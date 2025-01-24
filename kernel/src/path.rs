@@ -34,7 +34,6 @@ enum LogPathFileType {
     CompactedCommit {
         hi: Version,
     },
-    Sidecar,
     Unknown,
 }
 
@@ -142,7 +141,6 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
                     num_parts,
                 }
             }
-            [_uuid, "parquet"] => LogPathFileType::Sidecar,
             // Unrecognized log paths are allowed, so long as they have a valid version.
             _ => LogPathFileType::Unknown,
         };
@@ -159,12 +157,6 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
     #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
     fn is_commit(&self) -> bool {
         matches!(self.file_type, LogPathFileType::Commit)
-    }
-
-    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-    fn is_sidecar(&self) -> bool {
-        matches!(self.file_type, LogPathFileType::Sidecar)
     }
 
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]

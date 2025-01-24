@@ -664,6 +664,7 @@ mod tests {
                 StructField::not_null("dataChange", DataType::BOOLEAN),
                 tags_field(),
             ]),
+            true,
         )]));
         assert_eq!(schema, expected);
     }
