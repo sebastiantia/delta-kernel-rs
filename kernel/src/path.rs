@@ -34,6 +34,7 @@ enum LogPathFileType {
     CompactedCommit {
         hi: Version,
     },
+    Sidecar,
     Unknown,
 }
 
@@ -141,7 +142,7 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
                     num_parts,
                 }
             }
-
+            [_uuid, "parquet"] => LogPathFileType::Sidecar,
             // Unrecognized log paths are allowed, so long as they have a valid version.
             _ => LogPathFileType::Unknown,
         };
@@ -162,11 +163,18 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
 
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    fn is_sidecar(&self) -> bool {
+        matches!(self.file_type, LogPathFileType::Sidecar)
+    }
+
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
     fn is_checkpoint(&self) -> bool {
-        // TODO: Include UuidCheckpoint once we actually support v2 checkpoints
         matches!(
             self.file_type,
-            LogPathFileType::SinglePartCheckpoint | LogPathFileType::MultiPartCheckpoint { .. }
+            LogPathFileType::SinglePartCheckpoint
+                | LogPathFileType::MultiPartCheckpoint { .. }
+                | LogPathFileType::UuidCheckpoint(_)
         )
     }
 
@@ -174,11 +182,7 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
     #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
     #[allow(dead_code)] // currently only used in tests, which don't "count"
     fn is_unknown(&self) -> bool {
-        // TODO: Stop treating UuidCheckpoint as unknown once we support v2 checkpoints
-        matches!(
-            self.file_type,
-            LogPathFileType::Unknown | LogPathFileType::UuidCheckpoint(_)
-        )
+        matches!(self.file_type, LogPathFileType::Unknown)
     }
 }
 
@@ -199,6 +203,22 @@ impl ParsedLogPath<Url> {
         }
         Ok(path)
     }
+
+    // /// Create a new ParsedSidecarPath<Url> for a sidecar file name found in sidecar actions
+    // pub(crate) fn new_sidecar(
+    //     table_root: &Url,
+    //     file_name: String,
+    // ) -> DeltaResult<ParsedLogPath<Url>> {
+    //     let location = table_root.join("_delta_log/")?.join(&file_name)?;
+    //     let path = Self::try_from(location)?
+    //         .ok_or_else(|| Error::internal_error("attempted to create invalid sidecar path"))?;
+    //     if !path.is_sidecar() {
+    //         return Err(Error::internal_error(
+    //             "ParsedLogPath::new_sidecar created a non-sidecar path",
+    //         ));
+    //     }
+    //     Ok(path)
+    // }
 }
 
 #[cfg(test)]
@@ -357,10 +377,7 @@ mod tests {
             LogPathFileType::UuidCheckpoint(ref u) if u == "3a0d65cd-4056-49b8-937b-95f9e3ee90e5",
         ));
         assert!(!log_path.is_commit());
-
-        // TODO: Support v2 checkpoints! Until then we can't treat these as checkpoint files.
-        assert!(!log_path.is_checkpoint());
-        assert!(log_path.is_unknown());
+        assert!(log_path.is_checkpoint());
 
         let log_path = table_log_dir
             .join("00000000000000000002.checkpoint.3a0d65cd-4056-49b8-937b-95f9e3ee90e5.json")
@@ -377,10 +394,7 @@ mod tests {
             LogPathFileType::UuidCheckpoint(ref u) if u == "3a0d65cd-4056-49b8-937b-95f9e3ee90e5",
         ));
         assert!(!log_path.is_commit());
-
-        // TODO: Support v2 checkpoints! Until then we can't treat these as checkpoint files.
-        assert!(!log_path.is_checkpoint());
-        assert!(log_path.is_unknown());
+        assert!(log_path.is_checkpoint());
 
         let log_path = table_log_dir
             .join("00000000000000000002.checkpoint.3a0d65cd-4056-49b8-937b-95f9e3ee90e5.foo")

@@ -12,8 +12,8 @@ use crate::{DeltaResult, Error};
 use super::deletion_vector::DeletionVectorDescriptor;
 use super::schemas::ToSchema as _;
 use super::{
-    Add, Cdc, Format, Metadata, Protocol, Remove, SetTransaction, ADD_NAME, CDC_NAME,
-    METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
+    Add, Cdc, Format, Metadata, Protocol, Remove, SetTransaction, Sidecar, ADD_NAME, CDC_NAME,
+    METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME, SIDECAR_NAME,
 };
 
 #[derive(Default)]
@@ -356,7 +356,7 @@ impl RowVisitor for CdcVisitor {
             ))
         );
         for i in 0..row_count {
-            // Since path column is required, use it to detect presence of an Add action
+            // Since path column is required, use it to detect presence of a cdc action
             if let Some(path) = getters[0].get_opt(i, "cdc.path")? {
                 self.cdcs.push(Self::visit_cdc(i, path, getters)?);
             }
@@ -438,6 +438,55 @@ impl RowVisitor for SetTransactionVisitor {
                         self.set_transactions.insert(txn.app_id.clone(), txn);
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[allow(unused)]
+#[derive(Default)]
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct SidecarVisitor {
+    pub(crate) sidecars: Vec<Sidecar>,
+}
+
+impl SidecarVisitor {
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    fn visit_sidecar<'a>(
+        row_index: usize,
+        path: String,
+        getters: &[&'a dyn GetData<'a>],
+    ) -> DeltaResult<Sidecar> {
+        Ok(Sidecar {
+            path,
+            size_in_bytes: getters[1].get(row_index, "sidecar.sizeInBytes")?,
+            modification_time: getters[2].get(row_index, "sidecar.modificationTime")?,
+            tags: getters[3].get_opt(row_index, "sidecar.tags")?,
+        })
+    }
+}
+
+impl RowVisitor for SidecarVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| Sidecar::to_schema().leaves(SIDECAR_NAME));
+        NAMES_AND_TYPES.as_ref()
+    }
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        require!(
+            getters.len() == 4,
+            Error::InternalError(format!(
+                "Wrong number of SidecarVisitor getters: {}",
+                getters.len()
+            ))
+        );
+        for i in 0..row_count {
+            // Since path column is required, use it to detect presence of a sidecar action
+            if let Some(path) = getters[0].get_opt(i, "sidecar.path")? {
+                self.sidecars.push(Self::visit_sidecar(i, path, getters)?);
             }
         }
         Ok(())

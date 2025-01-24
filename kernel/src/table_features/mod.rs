@@ -133,6 +133,7 @@ pub(crate) static SUPPORTED_READER_FEATURES: LazyLock<HashSet<ReaderFeatures>> =
             ReaderFeatures::TypeWidening,
             ReaderFeatures::TypeWideningPreview,
             ReaderFeatures::VacuumProtocolCheck,
+            ReaderFeatures::V2Checkpoint,
         ])
     });
 

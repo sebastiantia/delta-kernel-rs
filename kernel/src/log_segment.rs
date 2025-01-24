@@ -1,13 +1,18 @@
 //! Represents a segment of a delta log. [`LogSegment`] wraps a set of  checkpoint and commit
 //! files.
 
-use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
+use crate::actions::visitors::SidecarVisitor;
+use crate::actions::{
+    get_log_add_schema, get_log_schema, Metadata, Protocol, Sidecar, METADATA_NAME, PROTOCOL_NAME,
+    SIDECAR_NAME,
+};
 use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::schema::SchemaRef;
 use crate::snapshot::CheckpointMetadata;
 use crate::utils::require;
 use crate::{
-    DeltaResult, Engine, EngineData, Error, Expression, ExpressionRef, FileSystemClient, Version,
+    DeltaResult, Engine, EngineData, Error, Expression, ExpressionRef, FileMeta, FileSystemClient,
+    ParquetHandler, RowVisitor, Version,
 };
 use itertools::Itertools;
 use std::collections::HashMap;
@@ -218,12 +223,107 @@ impl LogSegment {
             .iter()
             .map(|f| f.location.clone())
             .collect();
+
+        let file_type = if !self.checkpoint_parts.is_empty() {
+            self.checkpoint_parts[0].file_type.clone()
+        } else {
+            LogPathFileType::Unknown
+        };
+
+        let handler = engine.get_parquet_handler();
+        let log_root_ref = self.log_root.clone();
+
         let checkpoint_stream = engine
             .get_parquet_handler()
-            .read_parquet_files(&checkpoint_parts, checkpoint_read_schema, meta_predicate)?
-            .map_ok(|batch| (batch, false));
+            .read_parquet_files(
+                &checkpoint_parts,
+                checkpoint_read_schema.clone(),
+                meta_predicate,
+            )?
+            .flat_map(move |checkpoint_batch_result| {
+                match checkpoint_batch_result {
+                    Ok(checkpoint_batch) => {
+                        let stream: Box<
+                            dyn Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send,
+                        > = if let LogPathFileType::UuidCheckpoint(_uuid) = &file_type {
+                            if checkpoint_read_schema.contains(SIDECAR_NAME) {
+                                // If the checkpoint is a V2 checkpoint AND the schema contains the sidecar column,
+                                // we need to read the sidecar files and return the iterator of sidecar actions
+
+                                // Replay is sometimes passed a schema that doesn't contain the sidecar column. (e.g. when reading metadata & protocol)
+                                // In this case, we do not need to read the sidecar files and can chain the checkpoint batch as is.
+
+                                // Flatten the new batches returned. The new batches could be:
+                                // - the checkpoint batch itself if no sidecar actions are present
+                                // - 1 or more sidecar batch that are referenced by the checkpoint batch
+                                let iterator = Self::process_checkpoint_batch(
+                                    handler.clone(),
+                                    log_root_ref.clone(),
+                                    checkpoint_batch,
+                                );
+                                match iterator {
+                                    Ok(iter) => Box::new(iter.map_ok(|batch| (batch, false))),
+                                    Err(e) => Box::new(std::iter::once(Err(e))),
+                                }
+                            } else {
+                                // Chain the checkpoint batch as is if we do not need to extract sidecar actions
+                                Box::new(std::iter::once(Ok((checkpoint_batch, false))))
+                            }
+                        } else {
+                            // Chain the checkpoint batch as is if not a UUID checkpoint batch
+                            Box::new(std::iter::once(Ok((checkpoint_batch, false))))
+                        };
+                        stream
+                    }
+                    Err(e) => {
+                        // Chain the error if any
+                        Box::new(std::iter::once(Err(e)))
+                    }
+                }
+            });
 
         Ok(commit_stream.chain(checkpoint_stream))
+    }
+
+    fn process_checkpoint_batch(
+        parquet_handler: Arc<dyn ParquetHandler>,
+        log_root: Url,
+        batch: Box<dyn EngineData>,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send> {
+        let mut visitor = SidecarVisitor::default();
+
+        // collect sidecars
+        visitor.visit_rows_of(batch.as_ref())?;
+
+        //convert sidecar actions to sidecar file paths
+        let sidecar_files: Result<Vec<_>, _> = visitor
+            .sidecars
+            .iter()
+            .map(|sidecar| Self::sidecar_to_filemeta(sidecar, &log_root))
+            .collect();
+
+        let sidecar_read_schema = get_log_add_schema().clone();
+
+        // if sidecars exist, read the sidecar files and return the iterator of sidecar actions
+        if !visitor.sidecars.is_empty() {
+            return parquet_handler.read_parquet_files(&sidecar_files?, sidecar_read_schema, None);
+        } else {
+            return Ok(Box::new(std::iter::once(Ok(batch))));
+        }
+    }
+
+    // Helper function to convert a single sidecar action to a FileMeta
+    fn sidecar_to_filemeta(sidecar: &Sidecar, log_root: &Url) -> Result<FileMeta, Error> {
+        let location = log_root
+            .join("_sidecars/")
+            .map_err(Error::from)?
+            .join(&sidecar.path)
+            .map_err(Error::from)?;
+        Ok(FileMeta {
+            location,
+            last_modified: sidecar.modification_time,
+            size: sidecar.size_in_bytes as usize,
+        })
     }
 
     // Get the most up-to-date Protocol and Metadata actions
@@ -296,6 +396,7 @@ fn list_log_files(
             Err(_) => true,
         }))
 }
+
 /// List all commit and checkpoint files with versions above the provided `start_version` (inclusive).
 /// If successful, this returns a tuple `(ascending_commit_files, checkpoint_parts)` of type
 /// `(Vec<ParsedLogPath>, Vec<ParsedLogPath>)`. The commit files are guaranteed to be sorted in
