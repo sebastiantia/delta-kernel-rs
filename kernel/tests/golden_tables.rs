@@ -409,7 +409,7 @@ golden_test!("time-travel-start", latest_snapshot_test);
 golden_test!("time-travel-start-start20", latest_snapshot_test);
 golden_test!("time-travel-start-start20-start40", latest_snapshot_test);
 
-// golden_test!("v2-checkpoint-json", latest_snapshot_test);
+golden_test!("v2-checkpoint-json", latest_snapshot_test);
 golden_test!("v2-checkpoint-parquet", latest_snapshot_test);
 
 // BUG:
