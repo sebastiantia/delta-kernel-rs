@@ -220,11 +220,10 @@ impl LogSegment {
             .read_json_files(&commit_files, commit_read_schema, meta_predicate.clone())?
             .map_ok(|batch| (batch, true));
 
-        let file_type = self
-            .checkpoint_parts
-            .get(0)
-            .map(|file| file.file_type.clone())
-            .unwrap_or(LogPathFileType::Unknown);
+        let file_type = match self.checkpoint_parts.first() {
+            Some(part) => part.file_type.clone(),
+            None => LogPathFileType::Unknown,
+        };
 
         let checkpoint_parts: Vec<_> = self
             .checkpoint_parts
@@ -251,6 +250,9 @@ impl LogSegment {
                         checkpoint_read_schema.clone(),
                         meta_predicate,
                     )?
+                    // Flatten the new batches returned. The new batches could be:
+                    // - the checkpoint batch itself if no sidecar actions are present
+                    // - 1 or more sidecar batch that are referenced by the checkpoint batch
                     .flat_map(move |batch_result| match batch_result {
                         Ok(checkpoint_batch) => Self::create_stream_for_checkpoint_batch(
                             &file_type,
@@ -270,6 +272,9 @@ impl LogSegment {
                         checkpoint_read_schema.clone(),
                         meta_predicate,
                     )?
+                    // Flatten the new batches returned. The new batches could be:
+                    // - the checkpoint batch itself if no sidecar actions are present
+                    // - 1 or more sidecar batch that are referenced by the checkpoint batch
                     .flat_map(move |batch_result| match batch_result {
                         Ok(checkpoint_batch) => Self::create_stream_for_checkpoint_batch(
                             &file_type,
@@ -321,14 +326,18 @@ impl LogSegment {
     ) -> Box<dyn Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         match file_type {
             LogPathFileType::UuidCheckpoint(_) if checkpoint_read_schema.contains(SIDECAR_NAME) => {
-                // Continue processing if there is a chance that the checkpoint contains sidecar actions
+                // If the checkpoint is a V2 checkpoint AND the schema contains the sidecar column,
+                // we need to read the sidecar files and return the iterator of sidecar actions
+
+                // Replay is sometimes passed a schema that doesn't contain the sidecar column. (e.g. when reading metadata & protocol)
+                // In this case, we do not need to read the sidecar files and can chain the checkpoint batch as is.
                 match Self::process_checkpoint_batch(handler, log_root_ref, checkpoint_batch) {
                     Ok(iterator) => Box::new(iterator.map_ok(|batch| (batch, false))),
                     Err(e) => Box::new(std::iter::once(Err(e))),
                 }
             }
             _ => {
-                // The checkpoint does not contain sidecar actions, so we can return the batch as is
+                // Chain the checkpoint batch as is if we do not need to extract sidecar actions
                 Box::new(std::iter::once(Ok((checkpoint_batch, false))))
             }
         }
