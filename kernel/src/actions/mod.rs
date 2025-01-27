@@ -516,7 +516,6 @@ pub struct SetTransaction {
 
 #[derive(Debug, Clone, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 #[cfg_attr(test, derive(Serialize, Default), serde(rename_all = "camelCase"))]
 struct Sidecar {
     pub path: String, // Sidecar path relative to `_delta_log/_sidecar` directory.
@@ -652,7 +651,7 @@ mod tests {
         let schema = get_log_schema()
             .project(&[CDC_NAME])
             .expect("Couldn't get cdc field");
-        let expected = Arc::new(StructType::new([StructField::new(
+        let expected = Arc::new(StructType::new([StructField::nullable(
             "cdc",
             StructType::new([
                 StructField::not_null("path", DataType::STRING),
@@ -664,7 +663,6 @@ mod tests {
                 StructField::not_null("dataChange", DataType::BOOLEAN),
                 tags_field(),
             ]),
-            true,
         )]));
         assert_eq!(schema, expected);
     }

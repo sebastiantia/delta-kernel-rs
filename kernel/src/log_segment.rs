@@ -12,7 +12,7 @@ use crate::snapshot::CheckpointMetadata;
 use crate::utils::require;
 use crate::{
     DeltaResult, Engine, EngineData, Error, Expression, ExpressionRef, FileMeta, FileSystemClient,
-    ParquetHandler, RowVisitor, Version,
+    JsonHandler, ParquetHandler, RowVisitor, Version,
 };
 use itertools::Itertools;
 use std::collections::HashMap;
@@ -20,6 +20,36 @@ use std::convert::identity;
 use std::sync::{Arc, LazyLock};
 use tracing::warn;
 use url::Url;
+
+/// Enum representing different file handlers for reading files.
+enum FileHandler {
+    /// Handler for reading JSON files.
+    Json(Arc<dyn JsonHandler>),
+    /// Handler for reading Parquet files.
+    Parquet(Arc<dyn ParquetHandler>),
+}
+
+impl FileHandler {
+    /// Reads files based on the provided file metadata, schema, and optional predicate.
+    ///
+    /// This function delegates the reading of files to the appropriate handler based on the file type
+    /// (JSON or Parquet). It returns an iterator over the results, which can be used to process the
+    /// data in a streaming fashion.
+    ///
+    /// This function is particularly useful for abstracting the file reading logic for V2 checkpoints,
+    /// which can be stored in either JSON or Parquet format
+    fn read_files(
+        &self,
+        parts: &[FileMeta],
+        schema: SchemaRef,
+        predicate: Option<ExpressionRef>,
+    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>> {
+        match self {
+            FileHandler::Json(handler) => handler.read_json_files(parts, schema, predicate),
+            FileHandler::Parquet(handler) => handler.read_parquet_files(parts, schema, predicate),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -220,102 +250,68 @@ impl LogSegment {
             .read_json_files(&commit_files, commit_read_schema, meta_predicate.clone())?
             .map_ok(|batch| (batch, true));
 
-        let file_type = match self.checkpoint_parts.first() {
-            Some(part) => part.file_type.clone(),
-            None => LogPathFileType::Unknown,
-        };
+        let checkpoint_stream =
+            Self::create_checkpoint_stream(self, engine, checkpoint_read_schema, meta_predicate)?;
 
+        Ok(Box::new(commit_stream.chain(checkpoint_stream)))
+    }
+
+    fn create_checkpoint_stream(
+        &self,
+        engine: &dyn Engine,
+        checkpoint_read_schema: SchemaRef,
+        meta_predicate: Option<ExpressionRef>,
+    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send>>
+    {
         let checkpoint_parts: Vec<_> = self
             .checkpoint_parts
             .iter()
             .map(|f| f.location.clone())
             .collect();
 
-        let is_json_checkpoint = self
-            .checkpoint_parts
-            .get(0)
-            .map_or(false, |file| file.extension == "json");
+        if checkpoint_parts.is_empty() {
+            return Ok(Box::new(std::iter::empty()));
+        }
 
-        let log_root = self.log_root.clone();
-        let json_handler = engine.get_json_handler().clone();
-        let parquet_handler = engine.get_parquet_handler().clone();
+        let file_type = match self.checkpoint_parts.first() {
+            Some(part) => part.file_type.clone(),
+            None => LogPathFileType::Unknown,
+        };
+        let is_json_checkpoint = self.checkpoint_parts[0].extension == "json";
 
-        let checkpoint_stream: Box<
-            dyn Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send,
-        > = if is_json_checkpoint {
-            Box::new(
-                json_handler
-                    .read_json_files(
-                        &checkpoint_parts,
-                        checkpoint_read_schema.clone(),
-                        meta_predicate,
-                    )?
-                    // Flatten the new batches returned. The new batches could be:
-                    // - the checkpoint batch itself if no sidecar actions are present
-                    // - 1 or more sidecar batch that are referenced by the checkpoint batch
-                    .flat_map(move |batch_result| match batch_result {
-                        Ok(checkpoint_batch) => Self::create_stream_for_checkpoint_batch(
-                            &file_type,
-                            checkpoint_batch,
-                            checkpoint_read_schema.clone(),
-                            parquet_handler.clone(),
-                            log_root.clone(),
-                        ),
-                        Err(e) => Box::new(std::iter::once(Err(e))),
-                    }),
-            )
+        let json_handler = engine.get_json_handler();
+        let parquet_handler = engine.get_parquet_handler();
+        let handler = if is_json_checkpoint {
+            FileHandler::Json(json_handler)
         } else {
-            Box::new(
-                parquet_handler
-                    .read_parquet_files(
-                        &checkpoint_parts,
-                        checkpoint_read_schema.clone(),
-                        meta_predicate,
-                    )?
-                    // Flatten the new batches returned. The new batches could be:
-                    // - the checkpoint batch itself if no sidecar actions are present
-                    // - 1 or more sidecar batch that are referenced by the checkpoint batch
-                    .flat_map(move |batch_result| match batch_result {
-                        Ok(checkpoint_batch) => Self::create_stream_for_checkpoint_batch(
-                            &file_type,
-                            checkpoint_batch,
-                            checkpoint_read_schema.clone(),
-                            parquet_handler.clone(),
-                            log_root.clone(),
-                        ),
-                        Err(e) => Box::new(std::iter::once(Err(e))),
-                    }),
-            )
+            FileHandler::Parquet(parquet_handler)
         };
 
-        Ok(Box::new(commit_stream.chain(checkpoint_stream)))
-    }
+        let log_root = self.log_root.clone();
+        let parquet_handler = engine.get_parquet_handler().clone();
 
-    // fn process_checkpoint_stream<H>(
-    //     handler: Arc<H>,
-    //     checkpoint_parts: &[FileMeta],
-    //     read_schema: SchemaRef,
-    //     meta_predicate: Option<ExpressionRef>,
-    //     file_type: LogPathFileType,
-    //     log_root: Url,
-    //     parquet_handler: Arc<dyn ParquetHandler>,
-    // ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send>
-    // where
-    //     H: JsonHandler + ParquetHandler,
-    // {
-    //     Ok(handler
-    //         .read_parquet_files(&checkpoint_parts, read_schema.clone(), meta_predicate)?
-    //         .flat_map(move |batch_result| match batch_result {
-    //             Ok(checkpoint_batch) => Self::create_stream_for_checkpoint_batch(
-    //                 &file_type,
-    //                 checkpoint_batch,
-    //                 read_schema.clone(),
-    //                 parquet_handler.clone(),
-    //                 log_root.clone(),
-    //             ),
-    //             Err(e) => Box::new(std::iter::once(Err(e))),
-    //         }))
-    // }
+        Ok(Box::new(
+            handler
+                .read_files(
+                    &checkpoint_parts,
+                    checkpoint_read_schema.clone(),
+                    meta_predicate,
+                )?
+                // Flatten the new batches returned. The new batches could be:
+                // - the checkpoint batch itself if no sidecar actions are present
+                // - 1 or more sidecar batch that are referenced by the checkpoint batch
+                .flat_map(move |batch_result| match batch_result {
+                    Ok(checkpoint_batch) => Self::create_stream_for_checkpoint_batch(
+                        &file_type,
+                        checkpoint_batch,
+                        checkpoint_read_schema.clone(),
+                        parquet_handler.clone(),
+                        log_root.clone(),
+                    ),
+                    Err(e) => Box::new(std::iter::once(Err(e))),
+                }),
+        ))
+    }
 
     fn create_stream_for_checkpoint_batch(
         file_type: &LogPathFileType,
@@ -337,7 +333,7 @@ impl LogSegment {
                 }
             }
             _ => {
-                // Chain the checkpoint batch as is if we do not need to extract sidecar actions
+                // Return the checkpoint batch as is if we do not need to extract sidecar actions from it
                 Box::new(std::iter::once(Ok((checkpoint_batch, false))))
             }
         }
