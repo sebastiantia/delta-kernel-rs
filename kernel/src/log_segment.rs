@@ -276,14 +276,15 @@ impl LogSegment {
 
         // Replay is sometimes passed a schema that doesn't contain the sidecar column. (e.g. when reading metadata & protocol)
         // In this case, we do not need to read the sidecar files and can chain the checkpoint batch as is.
+        // If the schema contains file actions, we need to read the sidecar files to replace the checkpoint batch.
         let log_root = self.log_root.clone();
         let parquet_handler = engine.get_parquet_handler().clone();
         let checkpoint_stream = if need_file_actions {
             Left(
                 actions
                     // Flatten the new batches returned. The new batches could be:
-                    // - the checkpoint batch itself if no sidecar actions are present
-                    // - 1 or more sidecar batch that are referenced by the checkpoint batch
+                    // - the checkpoint batch itself if no sidecar actions are present in the batch
+                    // - 1 or more sidecar batches referenced in the checkpoint batch by sidecar actions
                     .flat_map(move |batch_result| match batch_result {
                         Ok(checkpoint_batch) => Right(
                             Self::create_stream_for_checkpoint_batch(
@@ -345,7 +346,8 @@ impl LogSegment {
 
         let sidecar_read_schema = get_log_add_schema().clone();
 
-        // if sidecars exist, read the sidecar files and return the iterator of sidecar actions
+        // if sidecars files exist, read the sidecar files and return the iterator of sidecar batches
+        // to replace the checkpoint batch in the top level iterator
         Ok(Right(parquet_handler.read_parquet_files(
             &sidecar_files?,
             sidecar_read_schema,
