@@ -4,13 +4,99 @@ use itertools::Itertools;
 use object_store::{memory::InMemory, path::Path, ObjectStore};
 use url::Url;
 
+use crate::actions::{get_log_schema, METADATA_NAME, PROTOCOL_NAME};
 use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
 use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
 use crate::engine::sync::SyncEngine;
 use crate::log_segment::LogSegment;
 use crate::snapshot::CheckpointMetadata;
-use crate::{FileSystemClient, Table};
+use crate::utils::test_utils::{MockEngine, MockJsonHandler, MockParquetHandler};
+use crate::{Engine, Expression, FileMeta, FileSystemClient, Table};
 use test_utils::delta_path_for_version;
+
+#[test]
+fn test_log_replay() {
+    fn create_file_meta(path: &str) -> FileMeta {
+        FileMeta {
+            location: Url::parse(path).expect("Invalid file URL"),
+            last_modified: 0,
+            size: 0,
+        }
+    }
+
+    // Initialize mock engine and handlers
+    let engine = MockEngine::new();
+    let json_handler_binding = engine.get_json_handler().as_any();
+    let mock_json_handler = json_handler_binding
+        .downcast_ref::<MockJsonHandler>()
+        .expect("Expected MockJsonHandler");
+    let parquet_handler_binding = engine.get_parquet_handler().as_any();
+    let mock_parquet_handler = parquet_handler_binding
+        .downcast_ref::<MockParquetHandler>()
+        .expect("Expected MockParquetHandler");
+
+    // Define checkpoint and commit files
+    let checkpoint_meta = create_file_meta("file:///00000000000000000001.checkpoint1.json");
+    let checkpoint_parts = vec![checkpoint_meta.to_parsed_log_path()];
+
+    let commit_files = [
+        "file:///00000000000000000001.version1.json",
+        "file:///00000000000000000002.version2.json",
+    ]
+    .into_iter()
+    .map(|path| create_file_meta(path).to_parsed_log_path())
+    .collect::<Vec<_>>();
+
+    let log_segment = LogSegment {
+        end_version: 0,
+        log_root: Url::parse("file:///checkpoint.json").expect("Invalid log root URL"),
+        ascending_commit_files: commit_files.clone(),
+        checkpoint_parts,
+    };
+
+    // Expected commit files should be read in reverse order
+    let expected_commit_files_read = [
+        "file:///00000000000000000002.version2.json",
+        "file:///00000000000000000001.version1.json",
+    ]
+    .into_iter()
+    .map(create_file_meta)
+    .collect::<Vec<_>>();
+
+    // Define predicate and projected schemas
+    let predicate = Some(Arc::new(Expression::or(
+        Expression::column([METADATA_NAME, "id"]).is_not_null(),
+        Expression::column([PROTOCOL_NAME, "minReaderVersion"]).is_not_null(),
+    )));
+    let commit_schema = get_log_schema()
+        .project(&[METADATA_NAME])
+        .expect("Failed to project schema");
+    let checkpoint_schema = get_log_schema()
+        .project(&[PROTOCOL_NAME])
+        .expect("Failed to project schema");
+
+    // Expect the JSON and Parquet handlers to receive the correct files, schemas, and predicates
+    mock_json_handler.expect_read_json_files(
+        expected_commit_files_read.clone(),
+        commit_schema.clone(),
+        predicate.clone(),
+        Ok(Box::new(std::iter::empty())),
+    );
+
+    mock_parquet_handler.expect_read_parquet_files(
+        vec![checkpoint_meta],
+        checkpoint_schema.clone(),
+        predicate.clone(),
+        Ok(Box::new(std::iter::empty())),
+    );
+
+    // Run the log replay
+    let result = log_segment.replay(&engine, commit_schema, checkpoint_schema, predicate);
+
+    // Verify expected results
+    assert!(result.is_ok());
+    assert!(result.unwrap().next().is_none());
+}
 
 // NOTE: In addition to testing the meta-predicate for metadata replay, this test also verifies
 // that the parquet reader properly infers nullcount = rowcount for missing columns. The two
