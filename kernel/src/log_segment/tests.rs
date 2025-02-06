@@ -4,37 +4,29 @@ use itertools::Itertools;
 use object_store::{memory::InMemory, path::Path, ObjectStore};
 use url::Url;
 
-use crate::actions::{get_log_add_schema, METADATA_NAME, PROTOCOL_NAME};
+use crate::actions::{get_log_add_schema, PROTOCOL_NAME};
 use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
 use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
 use crate::engine::sync::SyncEngine;
 use crate::log_segment::LogSegment;
 use crate::scan::test_utils::add_batch_simple;
 use crate::snapshot::CheckpointMetadata;
-use crate::utils::test_utils::{MockEngine, MockJsonHandler, MockParquetHandler};
-use crate::{Engine, EngineData, Expression, FileMeta, FileSystemClient, Table};
+use crate::utils::test_utils::MockEngineContext;
+use crate::{EngineData, Expression, FileMeta, FileSystemClient, Table};
 use test_utils::delta_path_for_version;
+
+fn create_file_meta(path: &str) -> FileMeta {
+    FileMeta {
+        location: Url::parse(path).expect("Invalid file URL"),
+        last_modified: 0,
+        size: 0,
+    }
+}
 
 #[test]
 fn test_log_replay() {
-    fn create_file_meta(path: &str) -> FileMeta {
-        FileMeta {
-            location: Url::parse(path).expect("Invalid file URL"),
-            last_modified: 0,
-            size: 0,
-        }
-    }
-
-    // Initialize mock engine and handlers
-    let engine = MockEngine::new();
-    let json_handler_binding = engine.get_json_handler().as_any();
-    let mock_json_handler = json_handler_binding
-        .downcast_ref::<MockJsonHandler>()
-        .expect("Expected MockJsonHandler");
-    let parquet_handler_binding = engine.get_parquet_handler().as_any();
-    let mock_parquet_handler = parquet_handler_binding
-        .downcast_ref::<MockParquetHandler>()
-        .expect("Expected MockParquetHandler");
+    // Retrieve the engine context
+    let engine_context = MockEngineContext::new();
 
     // Define checkpoint and commit files
     let checkpoint_meta = create_file_meta("file:///00000000000000000001.checkpoint1.json");
@@ -65,15 +57,14 @@ fn test_log_replay() {
     .collect::<Vec<_>>();
 
     // Define predicate and projected schemas
-    let predicate = Some(Arc::new(Expression::or(
-        Expression::column([METADATA_NAME, "id"]).is_not_null(),
+    let predicate = Some(Arc::new(
         Expression::column([PROTOCOL_NAME, "minReaderVersion"]).is_not_null(),
-    )));
+    ));
     let commit_schema = get_log_add_schema().clone();
     let checkpoint_schema = get_log_add_schema().clone();
 
     // Expect the JSON and Parquet handlers to receive the correct files, schemas, and predicates
-    mock_json_handler.expect_read_json_files(
+    engine_context.json_handler.expect_read_json_files(
         expected_commit_files_read.clone(),
         commit_schema.clone(),
         predicate.clone(),
@@ -81,7 +72,7 @@ fn test_log_replay() {
             add_batch_simple() as Box<dyn EngineData>
         )))),
     );
-    mock_parquet_handler.expect_read_parquet_files(
+    engine_context.parquet_handler.expect_read_parquet_files(
         vec![checkpoint_meta],
         checkpoint_schema.clone(),
         predicate.clone(),
@@ -92,22 +83,24 @@ fn test_log_replay() {
 
     // Run the log replay
     let mut iter = log_segment
-        .replay(&engine, commit_schema, checkpoint_schema, predicate)
+        .replay(
+            &engine_context.engine,
+            commit_schema,
+            checkpoint_schema,
+            predicate,
+        )
         .unwrap()
         .into_iter();
 
-    // Verify the commit batch and checkpoint batch are chained together
-    let first = iter.next().unwrap();
-    let (_, is_log_batch1) = first.unwrap();
-    assert!(is_log_batch1, "First element should be a commit batch");
-
-    let second = iter.next().unwrap();
-    let (_, is_log_batch2) = second.unwrap();
+    // Verify the commit batch and checkpoint batch are chained together in order
     assert!(
-        !is_log_batch2,
+        iter.next().unwrap().unwrap().1,
+        "First element should be a commit batch"
+    );
+    assert!(
+        !iter.next().unwrap().unwrap().1,
         "Second element should be a checkpoint batch"
     );
-
     assert!(iter.next().is_none(), "Iterator should only have 2 batches");
 }
 

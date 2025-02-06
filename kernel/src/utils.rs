@@ -81,10 +81,47 @@ pub(crate) mod test_utils {
         }
     }
 
+    /// A helper struct that bundles together all the components needed for mocking the engine in a test.
+    /// It provides easy access to the mock engine and its handlers in a single convenient package.
+    pub(crate) struct MockEngineContext {
+        pub engine: MockEngine,
+        pub json_handler: Arc<MockJsonHandler>,
+        pub parquet_handler: Arc<MockParquetHandler>,
+    }
+
+    impl MockEngineContext {
+        /// Creates a new MockEngineContext with all its components initialized.
+        /// This provides a convenient way to set up all necessary mocks for testing.
+        pub(crate) fn new() -> Self {
+            let engine = MockEngine::new();
+
+            // Extract and downcast the JSON handler from the engine
+            // This gives us direct access to the mock handler for setting expectations
+            let json_handler = engine
+                .get_json_handler()
+                .as_any()
+                .downcast::<MockJsonHandler>()
+                .expect("Expected MockJsonHandler");
+
+            // Extract and downcast the Parquet handler from the engine
+            // This gives us direct access to the mock handler for setting expectations
+            let parquet_handler = engine
+                .get_parquet_handler()
+                .as_any()
+                .downcast::<MockParquetHandler>()
+                .expect("Expected MockParquetHandler");
+
+            Self {
+                engine,
+                json_handler,
+                parquet_handler,
+            }
+        }
+    }
+
     /// A mock implementation of the `Engine` trait for unit testing purposes.
     ///
-    /// This engine provides mock JSON and Parquet handlers that allow controlled
-    /// file read expectations and assertions, ensuring that expected behavior is met.
+    /// Provides configurable handlers for testing file operations with controlled responses.
     pub(crate) struct MockEngine {
         json_handler: Arc<dyn JsonHandler>,
         parquet_handler: Arc<dyn ParquetHandler>,
@@ -120,23 +157,24 @@ pub(crate) mod test_utils {
         }
     }
 
-    /// Represents the expected parameters for a file read operation,
-    /// along with a predefined result to be returned.
+    /// Represents the expected parameters and result for a file read operation.
+    /// Used by mock handlers to verify that file operations are called with expected parameters.
     struct ExpectedFileReadParams {
-        // List of files expected to be read.
+        /// List of files that should be read in this operation
         files: Vec<FileMeta>,
 
-        // Expected schema reference for the file read.
+        /// Expected schema that should be used for reading the files
         schema: SchemaRef,
 
-        // Expected predicate filter applied to the read.
+        /// Expected predicate filter that should be applied during reading
         predicate: Option<ExpressionRef>,
 
-        // Predefined result to return.
+        /// Pre-configured result that should be returned when parameters match
         result: DeltaResult<FileDataReadResultIterator>,
     }
 
     /// Verifies that actual file read parameters match the expected parameters.
+    /// Asserts if any discrepancy is found between expected and actual values.
     fn assert_parameters_match(
         expected_params: &ExpectedFileReadParams,
         files: &[FileMeta],
@@ -176,10 +214,9 @@ pub(crate) mod test_utils {
     }
 
     /// A generic mock handler for testing file read operations.
-    ///
-    /// This handler maintains a queue of expected read calls and their results,
-    /// enforcing that calls occur in a defined order.
+    /// Maintains a queue of expected read operations and their results.
     struct MockHandler {
+        /// Queue of expected file read operations
         expected_file_reads_params: Mutex<VecDeque<ExpectedFileReadParams>>,
     }
 
@@ -191,7 +228,8 @@ pub(crate) mod test_utils {
             }
         }
 
-        /// Registers an expected file read operation with its expected result.
+        /// Registers an expected file read operation with specified parameters and result.
+        /// These expectations will be checked in order when read operations occur.
         fn expect_read_files(
             &self,
             files: Vec<FileMeta>,
@@ -210,7 +248,9 @@ pub(crate) mod test_utils {
                 });
         }
 
-        /// Retrieves and validates an expected file read operation, returning the associated result.
+        /// Processes a file read operation by comparing against the next expected operation.
+        /// Returns the pre-configured result if parameters match expectations.
+        /// Panics if no expectations are queued or if parameters don't match.
         fn read_files(
             &self,
             files: &[FileMeta],
@@ -231,20 +271,22 @@ pub(crate) mod test_utils {
         }
     }
 
-    /// A mock handler for testing Parquet file reads.
+    /// A specialized mock handler for testing Parquet file operations.
+    /// Wraps the generic MockHandler with Parquet-specific functionality.
     pub(crate) struct MockParquetHandler {
         handler: MockHandler,
     }
 
     impl MockParquetHandler {
-        /// Creates a new `MockParquetHandler`.
+        /// Creates a new `MockParquetHandler` with an empty expectation queue.
         pub(crate) fn new() -> Self {
             Self {
                 handler: MockHandler::new(),
             }
         }
 
-        /// Registers an expected call to `read_parquet_files`.
+        /// Registers an expected Parquet file read operation.
+        /// The operation will be expected to be called with exactly these parameters.
         pub(crate) fn expect_read_parquet_files(
             &self,
             files: Vec<FileMeta>,
@@ -258,7 +300,8 @@ pub(crate) mod test_utils {
     }
 
     impl ParquetHandler for MockParquetHandler {
-        /// Matches parameters with expected values and returns the result.
+        /// Implements the Parquet file read operation for testing.
+        /// Verifies the operation matches the next expected call and returns its result.
         fn read_parquet_files(
             &self,
             files: &[FileMeta],
@@ -269,20 +312,21 @@ pub(crate) mod test_utils {
         }
     }
 
-    /// A mock handler for testing JSON file reads.
+    /// Wraps the generic MockHandler with JSON-specific functionality.
     pub(crate) struct MockJsonHandler {
         handler: MockHandler,
     }
 
     impl MockJsonHandler {
-        /// Creates a new `MockJsonHandler`.
+        /// Creates a new `MockJsonHandler` with an empty expectation queue.
         pub(crate) fn new() -> Self {
             Self {
                 handler: MockHandler::new(),
             }
         }
 
-        /// Registers an expected call to `read_json_files`.
+        /// Registers an expected JSON file read operation.
+        /// The operation will be expected to be called with exactly these parameters.
         pub(crate) fn expect_read_json_files(
             &self,
             files: Vec<FileMeta>,
@@ -296,7 +340,8 @@ pub(crate) mod test_utils {
     }
 
     impl JsonHandler for MockJsonHandler {
-        /// Matches parameters with expected values and returns the result.
+        /// Implements the JSON file read operation for testing.
+        /// Verifies the operation matches the next expected call and returns its result.
         fn read_json_files(
             &self,
             files: &[FileMeta],
@@ -306,7 +351,8 @@ pub(crate) mod test_utils {
             self.handler.read_files(files, schema, predicate, "json")
         }
 
-        /// Placeholder implementation for JSON parsing.
+        /// Placeholder for JSON parsing operation.
+        /// Not implemented in the mock as it's not needed for current tests.
         fn parse_json(
             &self,
             _json_strings: Box<dyn crate::EngineData>,
@@ -315,7 +361,8 @@ pub(crate) mod test_utils {
             unimplemented!()
         }
 
-        /// Placeholder implementation for writing JSON data.
+        /// Placeholder for JSON file writing operation.
+        /// Not implemented in the mock as it's not needed for current tests.
         fn write_json_file(
             &self,
             _path: &url::Url,
