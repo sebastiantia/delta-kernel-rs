@@ -667,6 +667,7 @@ pub(crate) mod test_utils {
 
     use arrow_array::{RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+    use itertools::Itertools;
 
     use crate::{
         actions::get_log_schema,
@@ -704,7 +705,7 @@ pub(crate) mod test_utils {
                 r#"{{"sidecar":{{"path":"{path}","sizeInBytes":9268,"modificationTime":1714496113961,"tags":{{"tag_foo":"tag_bar"}}}}}}"#,
             )
         })
-        .collect::<Vec<_>>()
+        .collect_vec()
         .into();
 
         let parsed = handler
