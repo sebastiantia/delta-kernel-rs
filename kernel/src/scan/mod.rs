@@ -699,7 +699,6 @@ pub(crate) mod test_utils {
     ) -> Box<ArrowEngineData> {
         let handler = SyncJsonHandler {};
 
-        let json_strings = paths
         let mut json_strings: Vec<String> = paths
         .iter()
         .map(|path| {
