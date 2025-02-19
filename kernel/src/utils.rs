@@ -22,11 +22,9 @@ pub(crate) mod test_utils {
     use tempfile::TempDir;
     use test_utils::delta_path_for_version;
 
-    use crate::{
-        actions::{Add, Cdc, CommitInfo, Metadata, Protocol, Remove},
-        engine::arrow_data::ArrowEngineData,
-        EngineData,
-    };
+    use crate::actions::{Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
+    use crate::engine::arrow_data::ArrowEngineData;
+    use crate::EngineData;
 
     #[derive(Serialize)]
     pub(crate) enum Action {

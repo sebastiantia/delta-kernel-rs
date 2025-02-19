@@ -262,8 +262,12 @@ mod test {
         let protocol = Protocol::try_new(
             3,
             7,
-            Some([ReaderFeatures::UnsupportedFeature]),
-            Some([WriterFeatures::UnsupportedFeature]),
+            Some([ReaderFeatures::UnrecognizedReaderFeature(
+                "unrecognizedReaderFeature".to_string(),
+            )]),
+            Some([WriterFeatures::UnrecognizedWriterFeature(
+                "unrecognizedWriterFeature".to_string(),
+            )]),
         )
         .unwrap();
         let table_root = Url::try_from("file:///").unwrap();
