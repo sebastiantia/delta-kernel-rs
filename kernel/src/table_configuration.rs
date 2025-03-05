@@ -268,7 +268,7 @@ mod test {
         .unwrap();
         let table_root = Url::try_from("file:///").unwrap();
         TableConfiguration::try_new(metadata, protocol, table_root, 0)
-            .expect_err("V2 checkpoint is not supported in kernel");
+            .expect_err("Unknown feature is not supported in kernel");
     }
     #[test]
     fn dv_not_supported() {
