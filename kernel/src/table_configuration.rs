@@ -259,13 +259,7 @@ mod test {
             schema_string: r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#.to_string(),
             ..Default::default()
         };
-        let protocol = Protocol::try_new(
-            3,
-            7,
-            Some([ReaderFeatures::UnknownReaderFeature]),
-            Some([WriterFeatures::UnknownWriterFeature]),
-        )
-        .unwrap();
+        let protocol = Protocol::try_new(3, 7, Some(["unknown"]), Some(["unknown"])).unwrap();
         let table_root = Url::try_from("file:///").unwrap();
         TableConfiguration::try_new(metadata, protocol, table_root, 0)
             .expect_err("Unknown feature is not supported in kernel");

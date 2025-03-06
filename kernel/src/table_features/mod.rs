@@ -48,9 +48,6 @@ pub enum ReaderFeatures {
     /// vacuumProtocolCheck ReaderWriter feature ensures consistent application of reader and writer
     /// protocol checks during VACUUM operations
     VacuumProtocolCheck,
-    /// A dummy variant used to represent an unsupported feature for testing purposes
-    #[cfg(test)]
-    UnknownReaderFeature,
 }
 
 /// Similar to reader features, writer features communicate capabilities that must be implemented
@@ -112,9 +109,6 @@ pub enum WriterFeatures {
     /// vacuumProtocolCheck ReaderWriter feature ensures consistent application of reader and writer
     /// protocol checks during VACUUM operations
     VacuumProtocolCheck,
-    /// A dummy variant used to represent an unsupported feature for testing purposes
-    #[cfg(test)]
-    UnknownWriterFeature,
 }
 
 impl From<ReaderFeatures> for String {
@@ -160,7 +154,6 @@ mod tests {
             (ReaderFeatures::TypeWideningPreview, "typeWidening-preview"),
             (ReaderFeatures::V2Checkpoint, "v2Checkpoint"),
             (ReaderFeatures::VacuumProtocolCheck, "vacuumProtocolCheck"),
-            (ReaderFeatures::UnknownReaderFeature, "unknownReaderFeature"),
         ];
 
         assert_eq!(ReaderFeatures::VARIANTS.len(), cases.len());
@@ -199,7 +192,6 @@ mod tests {
             (WriterFeatures::IcebergCompatV1, "icebergCompatV1"),
             (WriterFeatures::IcebergCompatV2, "icebergCompatV2"),
             (WriterFeatures::VacuumProtocolCheck, "vacuumProtocolCheck"),
-            (WriterFeatures::UnknownWriterFeature, "unknownWriterFeature"),
         ];
 
         assert_eq!(WriterFeatures::VARIANTS.len(), cases.len());
