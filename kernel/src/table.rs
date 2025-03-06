@@ -8,12 +8,13 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use url::Url;
 
-use crate::actions::{get_log_schema, get_v1_checkpoint_schema, ADD_NAME, REMOVE_NAME};
 use crate::checkpoint::iterators::{CheckpointIterator, SidecarIterator, V1CheckpointFileIterator};
-use crate::checkpoint::log_replay::checkpoint_actions_iter;
+use crate::checkpoint::log_replay::{sidecar_actions_iter, v1_checkpoint_actions_iter};
+use crate::checkpoint::{get_sidecar_file_schema, get_v1_checkpoint_schema};
 use crate::path::ParsedLogPath;
 use crate::snapshot::Snapshot;
 use crate::table_changes::TableChanges;
@@ -27,10 +28,9 @@ pub struct Table {
     location: Url,
 }
 
-pub type FileDataToWrite = DeltaResult<(
-    Box<dyn Iterator<Item = DeltaResult<(Box<dyn EngineData>, Vec<bool>)>> + Send>,
-    Url,
-)>;
+pub type FileData = Box<dyn Iterator<Item = DeltaResult<(Box<dyn EngineData>, Vec<bool>)>> + Send>;
+pub type FileDataWithUrl = (FileData, Url);
+pub type FileDataIter = Box<dyn Iterator<Item = DeltaResult<FileDataWithUrl>> + Send>;
 
 impl std::fmt::Debug for Table {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
@@ -94,87 +94,133 @@ impl Table {
         Snapshot::try_new(self.location.clone(), engine, version)
     }
 
-    /// Returns a [`CheckpointIterator`] that can be used to write the table's state to storage.
+    /// Returns a [`CheckpointIterator`] object to be used to write a checkpoint at a given version.
     ///
-    /// If `version` is not supplied, the latest version will be used.
-    /// If the `v2Checkpoints` feature is enabled, the iterator will provide data to write the
-    /// new V2 checkpoint format. Otherwise, the iterator will provide data to write the V1
-    /// checkpoint format.
+    /// If the table supports the `v2Checkpoint` reader/writer feature, the V2 checkpoint format will
+    /// be used. Otherwise, the V1 checkpoint format will be used.
+    ///
+    /// # Example Usage
+    ///
+    /// ```
+    /// let engine = SyncEngine::new();
+    /// let checkpoint_iter = table.checkpoint(engine, Some(5))?;
+    /// // Use the iterator to write checkpoint files
+    /// ```
     pub fn checkpoint(
         &self,
         engine: &dyn Engine,
         version: Option<u64>,
-    ) -> DeltaResult<Box<dyn CheckpointIterator<Item = FileDataToWrite>>> {
+        toggle_for_testing: bool,
+    ) -> DeltaResult<Box<dyn CheckpointIterator>> {
+        // Get a snapshot of the table at the requested version (or latest)
         let snapshot = self.snapshot(engine, version)?;
 
-        // todo!(update table config)
-        // let isV2CheckpointsSupported = snapshot.table_configuration().is_v2_checkpoint_write_supported();
+        // Determine if V2 checkpoints are supported by this table configuration
+        let _is_v2_checkpoints_supported = snapshot
+            .table_configuration()
+            .is_v2_checkpoints_write_supported();
 
-        if true {
-            self.v1checkpoint(engine, snapshot)
+        // Create counters for tracking actions
+        let total_actions_counter = Arc::new(AtomicUsize::new(0));
+        let total_add_actions_counter = Arc::new(AtomicUsize::new(0));
+
+        // Calculate file retention timestamp
+        let minimum_file_retention_timestamp =
+            self.calculate_minimum_retention_timestamp(&snapshot)?;
+
+        // If V2 checkpoints are supported, use the V2 checkpoint format
+        if toggle_for_testing {
+            self.v2checkpoint(
+                engine,
+                snapshot,
+                total_actions_counter,
+                total_add_actions_counter,
+                minimum_file_retention_timestamp,
+            )
         } else {
-            // TODO!
-            self.v1checkpoint(engine, snapshot)
+            self.v1checkpoint(
+                engine,
+                snapshot,
+                total_actions_counter,
+                total_add_actions_counter,
+                minimum_file_retention_timestamp,
+            )
         }
     }
 
-    //TODO!
+    /// Creates a [`SidecarIterator`] that yields an iterator of data for sidecar files
+    /// that as a whole, contain all file actions for a given table snapshot.
     pub fn v2checkpoint(
         &self,
         engine: &dyn Engine,
         snapshot: Snapshot,
-    ) -> DeltaResult<Box<dyn CheckpointIterator<Item = FileDataToWrite>>> {
-        let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
-        let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
+        total_actions_counter: Arc<AtomicUsize>,
+        total_add_actions_counter: Arc<AtomicUsize>,
+        minimum_file_retention_timestamp: i64,
+    ) -> DeltaResult<Box<dyn CheckpointIterator>> {
+        // Get schema for sidecar files
+        let schema = get_sidecar_file_schema();
 
-        let iter = snapshot.log_segment().replay(
-            engine,
-            commit_read_schema,
-            checkpoint_read_schema,
-            None,
-        )?;
-        let total_actions_counter = Arc::<AtomicUsize>::new(AtomicUsize::new(0));
-        let total_add_actions_counter = Arc::<AtomicUsize>::new(AtomicUsize::new(0));
-
-        let actions = checkpoint_actions_iter(
-            iter,
-            total_actions_counter.clone(),
-            total_add_actions_counter.clone(),
-        );
-
-        Ok(Box::new(SidecarIterator::new(
-            actions,
-            2,
-            self.location.clone(),
-            snapshot.protocol().clone(),
-            snapshot.metadata().clone(),
-        )))
-    }
-
-    /// Returns a [`V1CheckpointFileIterator`] which yields the actions to write the V1 checkpoint file.
-    ///
-    /// The generic is required as rust can not infer the concrete type for I in V1CheckpointFileIterator
-    /// as replay returns an opaque type.
-    pub fn v1checkpoint(
-        &self,
-        engine: &dyn Engine,
-        snapshot: Snapshot,
-    ) -> DeltaResult<Box<dyn CheckpointIterator<Item = FileDataToWrite>>> {
-        let schema = get_v1_checkpoint_schema();
-
+        // Retrieve the iterator of actions over the log segment
         let iter = snapshot
             .log_segment()
             .replay(engine, schema.clone(), schema.clone(), None)?;
 
-        let total_actions_counter = Arc::<AtomicUsize>::new(AtomicUsize::new(0));
-        let total_add_actions_counter = Arc::<AtomicUsize>::new(AtomicUsize::new(0));
-
-        let actions = checkpoint_actions_iter(
+        // Replay the actions iterator to build selection vectors for each batch of actions for sidecar files
+        let actions_iter = sidecar_actions_iter(
             iter,
             total_actions_counter.clone(),
             total_add_actions_counter.clone(),
+            minimum_file_retention_timestamp,
         );
 
+        // Configure a reasonable threshold for action batching
+        let action_batch_threshold = self.determine_sidecar_batch_size(&snapshot);
+
+        // Create and return the sidecar iterator
+        Ok(Box::new(SidecarIterator::new(
+            actions_iter,
+            action_batch_threshold,
+            self.location.clone(),
+            snapshot,
+            total_actions_counter,
+            total_add_actions_counter,
+        )))
+    }
+
+    /// Determines an appropriate batch size for sidecar files based on table characteristics.
+    fn determine_sidecar_batch_size(&self, snapshot: &Snapshot) -> usize {
+        // TODO: Implement heuristics based on table size, action count, etc?
+        // For now, use a simple default value
+        200
+    }
+
+    /// Creates a [`V1CheckpointFileIterator`] that yields an iterator of data for a single
+    /// V1 checkpoint file.
+    pub fn v1checkpoint(
+        &self,
+        engine: &dyn Engine,
+        snapshot: Snapshot,
+        total_actions_counter: Arc<AtomicUsize>,
+        total_add_actions_counter: Arc<AtomicUsize>,
+        minimum_file_retention_timestamp: i64,
+    ) -> DeltaResult<Box<dyn CheckpointIterator>> {
+        let schema = get_v1_checkpoint_schema();
+
+        // Retrieve the iterator of actions over the log segment
+        let iter = snapshot
+            .log_segment()
+            .replay(engine, schema.clone(), schema.clone(), None)?;
+
+        // Replay the actions iterator to build selection vectors for each batch of actions
+        let actions = v1_checkpoint_actions_iter(
+            iter,
+            total_actions_counter.clone(),
+            total_add_actions_counter.clone(),
+            minimum_file_retention_timestamp,
+        );
+
+        // Create and return the V1 checkpoint iterator
         Ok(Box::new(V1CheckpointFileIterator::new(
             actions,
             self.location.clone(),
@@ -182,6 +228,44 @@ impl Table {
             total_actions_counter,
             total_add_actions_counter,
         )))
+    }
+
+    /// Calculates the minimum timestamp for file retention based on table policy.
+    ///
+    /// Remove actions with deletion timestamps _later_ than this value will be retained
+    /// in the table's log for VACUUM operations. The default retention duration is 7 days.
+    fn calculate_minimum_retention_timestamp(&self, snapshot: &Snapshot) -> DeltaResult<i64> {
+        // Get the retention duration from table properties, defaulting to 7 days
+        let deleted_file_retention_duration = snapshot
+            .table_properties()
+            .deleted_file_retention_duration
+            .unwrap_or_else(|| std::time::Duration::from_secs(60 * 60 * 24 * 7));
+
+        // Calculate the current time
+        let duration_since_epoch = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|e| {
+                Error::generic(format!(
+                    "Error encountered when computing duration since epoch: {:?}",
+                    e
+                ))
+            })?;
+
+        // Calculate the cutoff time by subtracting retention duration from current time
+        let minimum_file_retention_timestamp = duration_since_epoch
+            .as_millis()
+            .checked_sub(deleted_file_retention_duration.as_millis())
+            .ok_or_else(|| {
+                Error::generic(
+                    "Overflow in timestamp calculation for minimumFileRetentionTimestamp",
+                )
+            })?
+            .try_into()
+            .map_err(|_| {
+                Error::generic("Failed to convert minimum_file_retention_timestamp to i64")
+            })?;
+
+        Ok(minimum_file_retention_timestamp)
     }
     // Here actions: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, Vec<bool>)>>
     /// Create a [`TableChanges`] to get a change data feed for the table between `start_version`,
@@ -254,7 +338,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        actions::{Metadata, Protocol},
+        actions::{Metadata, Protocol, Sidecar},
         arrow,
         checkpoint::get_checkpoint_metadata_schema,
         engine::{
@@ -283,7 +367,7 @@ mod tests {
         let url = url::Url::from_directory_path(path).unwrap();
         let engine = SyncEngine::new();
         let table = Table::new(url);
-        let mut checkpointer = table.checkpoint(&engine, None).unwrap();
+        let mut checkpointer = table.checkpoint(&engine, None, false).unwrap();
 
         for checkpoint_file_iterator in &mut checkpointer {
             let (iter, file_path) = checkpoint_file_iterator.unwrap();
@@ -312,7 +396,7 @@ mod tests {
             // write the parquet file
         }
 
-        let result = checkpointer.sidecar_metadata(vec![]);
+        let result = checkpointer.sidecar_metadata(vec![], &engine);
         assert!(result.is_err());
 
         let field = Arc::new(Field::new("size", DataType::Int64, false));
@@ -327,6 +411,88 @@ mod tests {
         }
 
         assert!(result.is_ok())
+    }
+
+    #[test]
+    fn test_v2_checkpoint() -> DeltaResult<()> {
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/app-txn-no-checkpoint/")).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+        let engine = SyncEngine::new();
+        let table = Table::new(url);
+        let mut sidecar_iterator = table.checkpoint(&engine, None, true).unwrap();
+
+        for checkpoint_file_iterator in &mut sidecar_iterator {
+            let (iter, file_path) = checkpoint_file_iterator.unwrap();
+            // assert!(file_path.as_str().ends_with(&format!("{:020}.parquet", i)));
+            println!("{:?}", file_path);
+
+            for batch_result in iter {
+                let (data, selection_vector) = batch_result.unwrap();
+                println!("{:?}", selection_vector);
+                let engine_data: Box<dyn EngineData> = data;
+
+                let record_batch = engine_data
+                    .any_ref()
+                    .downcast_ref::<ArrowEngineData>()
+                    .unwrap()
+                    .record_batch();
+
+                // Print record batch nicely
+                let pretty_format =
+                    arrow::util::pretty::pretty_format_batches(&[record_batch.clone()])
+                        .unwrap()
+                        .to_string();
+                println!("{}", pretty_format);
+            }
+
+            // write the parquet file
+        }
+
+        let mut v2_checkpoint_iterator = sidecar_iterator.sidecar_metadata(vec![], &engine)?;
+
+        for checkpoint_file_iterator in &mut v2_checkpoint_iterator {
+            let (iter, file_path) = checkpoint_file_iterator.unwrap();
+            // assert!(file_path.as_str().ends_with(&format!("{:020}.parquet", i)));
+            println!("{:?}", file_path);
+
+            for batch_result in iter {
+                let (data, selection_vector) = batch_result.unwrap();
+                println!("{:?}", selection_vector);
+                let engine_data: Box<dyn EngineData> = data;
+
+                let record_batch = engine_data
+                    .any_ref()
+                    .downcast_ref::<ArrowEngineData>()
+                    .unwrap()
+                    .record_batch();
+
+                // Print record batch nicely
+                let pretty_format =
+                    arrow::util::pretty::pretty_format_batches(&[record_batch.clone()])
+                        .unwrap()
+                        .to_string();
+                println!("{}", pretty_format);
+            }
+
+            // write the parquet file
+        }
+
+        let field = Arc::new(Field::new("size", DataType::Int64, false));
+        let schema = Schema::new([field.clone()]);
+
+        let record_batch = RecordBatch::new_empty(Arc::new(schema));
+
+        let result = v2_checkpoint_iterator
+            .checkpoint_metadata(&ArrowEngineData::new(record_batch), &engine);
+
+        if let Err(err) = result {
+            panic!("Error: {:?}", err);
+        }
+
+        assert!(result.is_ok());
+
+        Ok(())
     }
 
     #[test]
@@ -409,7 +575,9 @@ mod tests {
     #[test]
     fn test_sidecar_iterator() {
         // Use a base URL for file paths.
-        let base_url = Url::parse("file:///").unwrap();
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/app-txn-no-checkpoint/")).unwrap();
+        let base_url = url::Url::from_directory_path(path).unwrap();
         let data = vec![
             create_mock_data(vec![true; 1]),
             create_mock_data(vec![true; 1]),
@@ -424,16 +592,17 @@ mod tests {
         ];
         let chunker = SidecarIterator::new(
             data.into_iter(),
-            3,
+            4,
             base_url.clone(),
-            Protocol::default(),
-            Metadata::default(),
+            Snapshot::try_new(base_url, &SyncEngine::new(), None).unwrap(),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
         );
         // Collect all sidecar file outputs.
         let result: Vec<_> = chunker.collect();
 
-        // We expect 4 chunks.
-        assert_eq!(result.len(), 4);
+        // We expect 3 chunks.
+        assert_eq!(result.len(), 3);
         for sidecar_file_result in result {
             let (file_iter, path) = sidecar_file_result.unwrap();
             // Verify that the sidecar file name matches the expected format.
