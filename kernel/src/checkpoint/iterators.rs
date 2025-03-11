@@ -10,10 +10,7 @@ use std::sync::Arc;
 use url::Url;
 
 use super::log_replay::v2_checkpoint_actions_iter;
-use super::{
-    get_checkpoint_metadata_schema, get_last_checkpoint_schema, get_sidecar_schema,
-    get_v2_checkpoint_schema,
-};
+use super::{get_last_checkpoint_schema, get_sidecar_schema, get_v2_checkpoint_schema};
 
 /// The filtered version of engine data with a boolean vector indicating which actions to process
 pub type FilteredEngineData = (Box<dyn EngineData>, Vec<bool>);
@@ -27,429 +24,282 @@ pub type FileDataWithUrl = (FileData, Url);
 /// Iterator for file data with URLs
 pub type FileDataIter = Box<dyn Iterator<Item = DeltaResult<FileDataWithUrl>> + Send>;
 
-/// Trait defining operations for checkpoint iterators.
-/// Checkpoint iterators are responsible for generating checkpoint files
-/// for Delta tables in both V1 and V2 formats.
-pub trait CheckpointIterator: Iterator<Item = DeltaResult<FileDataWithUrl>> + Send {
-    /// Creates a new checkpoint iterator that includes sidecar metadata.
-    /// Used for V2 checkpoint creation.
-    fn sidecar_metadata(
-        &self,
-        sidecar_metadata: Vec<Sidecar>,
-        engine: &dyn Engine,
-    ) -> DeltaResult<Box<dyn CheckpointIterator>>;
-
-    /// Writes the checkpoint metadata to the _last_checkpoint.json file.
-    fn checkpoint_metadata(
-        &self,
-        metadata: &dyn EngineData,
-        engine: &dyn Engine,
-    ) -> DeltaResult<()>;
+/// Iterator for V1 checkpoint files
+/// Returns a single file that contains all checkpoint data
+pub struct V1CheckpointFileIterator {
+    /// The underlying data iterator, wrapped in Option to allow consumption
+    iter: Option<Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>> + Send>>,
+    /// Root URL of the Delta table
+    table_root: Url,
+    /// Version of the checkpoint
+    checkpoint_version: Version,
+    /// Counter tracking the total number of actions
+    total_actions_counter: Arc<AtomicUsize>,
+    /// Counter tracking the total number of add actions
+    total_add_actions_counter: Arc<AtomicUsize>,
 }
 
-/// An iterator that lazily groups incoming actions into chunks based on a threshold.
-/// This is used to create sidecar files for V2 checkpoints.
-pub struct SidecarIterator<I>
-where
-    I: Iterator<Item = DeltaResult<FilteredEngineData>> + Send + 'static,
-{
-    iter: Peekable<I>,                           // Underlying iterator for actions
-    threshold: usize,                            // Maximum number of actions per sidecar file
-    table_location: Url,                         // Root location of the Delta table
-    num_sidecars: usize,                         // Counter for generated sidecar files
-    snapshot: Snapshot,                          // Snapshot of the Delta table
-    total_actions_counter: Arc<AtomicUsize>,     // Counter for total actions processed
-    total_add_actions_counter: Arc<AtomicUsize>, // Counter for ADD actions processed
-}
-
-impl<I> SidecarIterator<I>
-where
-    I: Iterator<Item = DeltaResult<FilteredEngineData>> + Send + 'static,
-{
+impl V1CheckpointFileIterator {
+    /// Creates a new V1 checkpoint file iterator
     pub fn new(
-        iter: I,
-        threshold: usize,
-        table_location: Url,
-        snapshot: Snapshot,
-        total_actions_counter: Arc<AtomicUsize>,
-        total_add_actions_counter: Arc<AtomicUsize>,
-    ) -> Self {
-        SidecarIterator {
-            iter: iter.peekable(),
-            threshold,
-            table_location,
-            num_sidecars: 0,
-            snapshot,
-            total_actions_counter,
-            total_add_actions_counter,
-        }
-    }
-
-    /// Helper to count the number of true flags in a vector.
-    fn count_true_flags(bools: &[bool]) -> usize {
-        bools.iter().filter(|&&flag| flag).count()
-    }
-
-    /// Creates record batches for sidecar metadata.
-    ///
-    /// Converts a vector of Sidecar objects into filtered engine data that can be
-    /// written to the checkpoint file.
-    fn create_sidecar_batches(
-        &self,
-        metadata: Vec<Sidecar>,
-    ) -> DeltaResult<Vec<DeltaResult<FilteredEngineData>>> {
-        let mut result = vec![];
-
-        for sidecar in metadata {
-            // TODO: Replace with create_one() expression API when available
-
-            // Construct the record batch with sidecar metadata fields
-            let path = Arc::new(StringArray::from(vec![sidecar.path]));
-            let size_in_bytes = Arc::new(Int64Array::from(vec![sidecar.size_in_bytes]));
-            let modification_time = Arc::new(Int64Array::from(vec![sidecar.modification_time]));
-
-            // Create a record batch with the sidecar schema
-            let record_batch = RecordBatch::try_new(
-                Arc::new(get_sidecar_schema().as_ref().try_into()?),
-                vec![path, size_in_bytes, modification_time],
-            )?;
-
-            // Add the record batch to results with all flags set to true (process all)
-            result.push(Ok((
-                Box::new(ArrowEngineData::new(record_batch)) as Box<dyn EngineData>,
-                vec![true],
-            )));
-        }
-
-        Ok(result)
-    }
-}
-
-impl<I> CheckpointIterator for SidecarIterator<I>
-where
-    I: Iterator<Item = DeltaResult<FilteredEngineData>> + Send + 'static,
-{
-    fn sidecar_metadata(
-        &self,
-        metadata: Vec<Sidecar>,
-        engine: &dyn Engine,
-    ) -> DeltaResult<Box<dyn CheckpointIterator>> {
-        let schema = get_v2_checkpoint_schema();
-
-        let iter =
-            self.snapshot
-                .log_segment()
-                .replay(engine, schema.clone(), schema.clone(), None)?;
-
-        let actions_iter = v2_checkpoint_actions_iter(iter, self.total_actions_counter.clone());
-
-        // Combine the action iterator with geneerated sidecar action batches
-        let total_actions_iter =
-            actions_iter.chain(self.create_sidecar_batches(metadata)?.into_iter());
-
-        Ok(Box::new(V2CheckpointFileIterator {
-            iter: Some(total_actions_iter.peekable()),
-            table_root: self.table_location.clone(),
-            checkpoint_version: self.snapshot.version(),
-            total_actions_counter: self.total_actions_counter.clone(),
-            total_add_actions_counter: self.total_add_actions_counter.clone(),
-        }))
-    }
-
-    fn checkpoint_metadata(
-        &self,
-        metadata: &dyn EngineData,
-        engine: &dyn Engine,
-    ) -> DeltaResult<()> {
-        // For V2 checkpoints, sidecar_metadata must be called first
-        return Err(Error::GenericError {
-        source: "Writing a V2 checkpoint, and still need to write top-level V2 checkpoint file. First call sidecar() instead!".to_string().into(),
-    });
-    }
-}
-
-impl<I> Iterator for SidecarIterator<I>
-where
-    I: Iterator<Item = DeltaResult<FilteredEngineData>> + Send + 'static,
-{
-    type Item = DeltaResult<(FileData, Url)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut chunk = Vec::new();
-        let mut actions_in_chunk = 0;
-
-        // Keep collecting action batches until we reach the threshold or exhaust the iterator
-        while self.iter.peek().is_some() {
-            // Count how many action batches in the next item would be selected
-            let num_selected_actions = self
-                .iter
-                .peek()
-                .and_then(|res| res.as_ref().ok())
-                .map(|(_, bools)| Self::count_true_flags(bools))
-                .unwrap_or(0);
-
-            // If adding the next batch would exceed the threshold, stop collecting
-            if !chunk.is_empty() && actions_in_chunk + num_selected_actions > self.threshold {
-                break;
-            }
-            // Get the next item and add it to the chunk
-            // Should not panic as we've checked for None.
-            let item = self.iter.next()?;
-            actions_in_chunk += num_selected_actions;
-            chunk.push(item);
-        }
-
-        // If no actions were collected, we're done
-        if chunk.is_empty() {
-            return None;
-        }
-
-        // If we've exhausted the iterator and haven't yet written a sidecar file,
-        // we can move the file actions into the top-level v2 checkpoint file
-        // if self.iter.peek().is_none() && self.num_sidecars == 0 {
-        //     // Optimization
-        //     todo!();
-        // }
-
-        // Process chunk and create a sidecar file.
-        // TODO: Follow sidecar naming convention
-        let file_name = format!("{:020}.parquet", self.num_sidecars);
-        self.num_sidecars += 1;
-        let sidecar_path_res = self
-            .table_location
-            .join("_delta_log/sidecars/")
-            .and_then(|url| url.join(&file_name));
-
-        match sidecar_path_res {
-            Ok(sidecar_path) => {
-                // Wrap the collected Vec into an iterator for FileData.
-                let sidecar_iter = Box::new(chunk.into_iter());
-                Some(Ok((sidecar_iter, sidecar_path)))
-            }
-            Err(e) => Some(Err(error::Error::InvalidUrl(e))),
-        }
-    }
-}
-
-/// Iterator for generating V2 checkpoint files.
-/// This is created after sidecar files have been generated
-/// and contains the top-level checkpoint information.
-pub struct V2CheckpointFileIterator<I>
-where
-    I: Iterator<Item = DeltaResult<FilteredEngineData>> + Send + 'static,
-{
-    iter: Option<Peekable<I>>, // Iterator wrapped in Option to allow moving out
-    table_root: Url,           // Root location of the Delta table
-    checkpoint_version: Version, // Version number for the checkpoint
-    total_actions_counter: Arc<AtomicUsize>, // Counter for total actions
-    total_add_actions_counter: Arc<AtomicUsize>, // Counter for ADD actions
-}
-
-// Intermediate iterator to handle the V2 checkpoint file creation
-impl<I> Iterator for V2CheckpointFileIterator<I>
-where
-    I: Iterator<Item = DeltaResult<FilteredEngineData>> + Send + 'static,
-{
-    type Item = DeltaResult<FileDataWithUrl>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // This iterator should return the V2 checkpoint file as its only item
-        // by moving the inner iterator out of self.iter
-        let iter = self.iter.take()?;
-
-        // Convert the iterator into a FileData type
-        let file_data = Box::new(iter) as FileData;
-
-        // Create the path for the V2 checkpoint file
-        let checkpoint_path = match self.table_root.join("_delta_log/") {
-            Ok(path) => match path.join(&format!(
-                "{:020}.checkpoint.parquet",
-                self.checkpoint_version
-            )) {
-                Ok(full_path) => full_path,
-                Err(e) => return Some(Err(error::Error::InvalidUrl(e))),
-            },
-            Err(e) => return Some(Err(error::Error::InvalidUrl(e))),
-        };
-
-        // Return the FileData and URL as a tuple
-        Some(Ok((file_data, checkpoint_path)))
-    }
-}
-
-impl<I> CheckpointIterator for V2CheckpointFileIterator<I>
-where
-    I: Iterator<Item = DeltaResult<FilteredEngineData>> + Send + 'static,
-{
-    fn sidecar_metadata(
-        &self,
-        _sidecar_metadata: Vec<Sidecar>,
-        _engine: &dyn Engine,
-    ) -> DeltaResult<Box<dyn CheckpointIterator>> {
-        // Cannot create another checkpoint iterator from V2CheckpointFileIterator
-        Err(Error::GenericError {
-            source: "V2CheckpointFileIterator already created. Cannot create another checkpoint iterator.".to_string().into(),
-        })
-    }
-
-    fn checkpoint_metadata(
-        &self,
-        metadata: &dyn EngineData,
-        engine: &dyn Engine,
-    ) -> DeltaResult<()> {
-        // TODO: make sure metadata conforms to the correct schema & extract `sizeInBytes`.
-        let checkpoint_metadata_schema = get_checkpoint_metadata_schema();
-
-        let last_checkpoint_path = self
-            .table_root
-            .join("_delta_log/")?
-            .join("_last_checkpoint.json")?;
-
-        // TODO: leverage create_one() expression API when available?
-
-        // Get the record batch for the metadata and wrap it into an iterator.
-        let data = last_checkpoint_record_batch(
-            self.checkpoint_version,
-            self.total_actions_counter.clone(),
-            self.total_add_actions_counter.clone(),
-        )?;
-        let iter = Box::new(std::iter::once(Ok(data)));
-        engine
-            .get_json_handler()
-            .write_json_file(&last_checkpoint_path, iter, true)?;
-
-        Ok(())
-    }
-}
-
-/// Iterator for generating V1 checkpoint files.
-/// V1 checkpoints use a single file without sidecars.
-pub struct V1CheckpointFileIterator<I>
-where
-    I: Iterator<Item = DeltaResult<FilteredEngineData>> + Send + 'static,
-{
-    iter: Option<Peekable<I>>, // Iterator wrapped in Option to allow moving out
-    table_root: Url,           // Root location of the Delta table
-    checkpoint_version: Version, // Version number for the checkpoint
-    total_actions_counter: Arc<AtomicUsize>, // Counter for total actions
-    total_add_actions_counter: Arc<AtomicUsize>, // Counter for ADD actions
-}
-
-impl<I> V1CheckpointFileIterator<I>
-where
-    I: Iterator<Item = DeltaResult<FilteredEngineData>> + Send + 'static,
-{
-    pub fn new(
-        iter: I,
+        iter: Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>> + Send>,
         table_root: Url,
         checkpoint_version: Version,
         total_actions_counter: Arc<AtomicUsize>,
         total_add_actions_counter: Arc<AtomicUsize>,
     ) -> Self {
         V1CheckpointFileIterator {
-            iter: Some(iter.peekable()), // Wrap in Option for later movement
+            iter: Some(iter),
             table_root,
             checkpoint_version,
             total_actions_counter,
             total_add_actions_counter,
         }
     }
-}
 
-impl<I> CheckpointIterator for V1CheckpointFileIterator<I>
-where
-    I: Iterator<Item = DeltaResult<FilteredEngineData>> + Send + 'static,
-{
-    fn sidecar_metadata(
-        &self,
-        _sidecar_metadata: Vec<Sidecar>,
-        _engine: &dyn Engine,
-    ) -> DeltaResult<Box<dyn CheckpointIterator>> {
-        // V1 checkpoints do not support sidecar files
-        return Err(Error::GenericError {
-            source: "Writing a V1 checkpoint. Cannot transition to V2. Call checkpoint_metadata() instead.".to_string().into(),
-        });
+    /// Consumes the iterator and returns the underlying data with the checkpoint file path
+    /// This method can only be called once per iterator instance
+    pub fn get_file_data_iter(&mut self) -> DeltaResult<FileDataWithUrl> {
+        let v1_checkpoint_file_path =
+            ParsedLogPath::new_v1_checkpoint(&self.table_root, self.checkpoint_version)?;
+
+        match self.iter.take() {
+            Some(iter) => Ok((Box::new(iter) as FileData, v1_checkpoint_file_path.location)),
+            None => Err(Error::Generic(
+                "Iterator has already been consumed".to_string(),
+            )),
+        }
     }
 
-    // Write the `_last_checkpoint` metadata file.
-    fn checkpoint_metadata(
-        &self,
-        // Metadata must follow the schema defined in `get_checkpoint_metadata_schema()`.
+    /// Writes the checkpoint metadata file (_last_checkpoint.json)
+    /// This is the final step in the V1 checkpoint process
+    pub fn checkpoint_metadata(
+        self,
         metadata: &dyn EngineData,
         engine: &dyn Engine,
     ) -> DeltaResult<()> {
-        // TODO: make sure metadata conforms to the correct schema & extract `sizeInBytes`.
-        let checkpoint_metadata_schema = get_checkpoint_metadata_schema();
-
         let last_checkpoint_path = self
             .table_root
             .join("_delta_log/")?
             .join("_last_checkpoint.json")?;
 
-        // TODO: leverage create_one() expression API when available?
-
-        // Get the record batch for the metadata and wrap it into an iterator.
         let data = last_checkpoint_record_batch(
             self.checkpoint_version,
-            self.total_actions_counter.clone(),
-            self.total_add_actions_counter.clone(),
+            self.total_actions_counter,
+            self.total_add_actions_counter,
         )?;
-        let iter = Box::new(std::iter::once(Ok(data)));
+        let iter_data = Box::new(std::iter::once(Ok(data)));
         engine
             .get_json_handler()
-            .write_json_file(&last_checkpoint_path, iter, true)?;
+            .write_json_file(&last_checkpoint_path, iter_data, true)?;
 
         Ok(())
     }
 }
 
-impl<I> Iterator for V1CheckpointFileIterator<I>
-where
-    I: Iterator<Item = DeltaResult<FilteredEngineData>> + Send + 'static,
-{
-    type Item = DeltaResult<FileDataWithUrl>;
+/// Iterator for sidecars in V2 checkpoints
+/// This is an intermediate stage for V2 checkpoints
+pub struct SidecarIterator {
+    /// The underlying data iterator, wrapped in Option to allow consumption
+    iter: Option<Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>> + Send>>,
+    /// Root URL of the Delta table
+    table_location: Url,
+    /// Snapshot representing the state of the table
+    snapshot: Snapshot,
+    /// Counter tracking the total number of actions
+    total_actions_counter: Arc<AtomicUsize>,
+    /// Counter tracking the total number of add actions
+    total_add_actions_counter: Arc<AtomicUsize>,
+}
 
-    // we need to move self.iter out of self, but self.iter is behind a mutable reference (&mut self).
-    // Since we don't need self.iter anymore after calling next() once, we can use Option::take() to move it out.
-    fn next(&mut self) -> Option<Self::Item> {
-        let v1_checkpoint_file_path =
-            match ParsedLogPath::new_v1_checkpoint(&self.table_root, self.checkpoint_version) {
-                Ok(path) => path,
-                Err(_err) => {
-                    return Some(Err(Error::Generic(
-                        "Error parsing checkpoint file path".to_string(),
-                    )))
-                }
-            };
+impl SidecarIterator {
+    /// Creates a new sidecar iterator for V2 checkpoints
+    pub fn new(
+        iter: Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>> + Send>,
+        table_location: Url,
+        snapshot: Snapshot,
+        total_actions_counter: Arc<AtomicUsize>,
+        total_add_actions_counter: Arc<AtomicUsize>,
+    ) -> Self {
+        SidecarIterator {
+            iter: Some(iter),
+            table_location,
+            snapshot,
+            total_actions_counter,
+            total_add_actions_counter,
+        }
+    }
 
-        // We call take() on self.iter because we expect only a single chunk.
-        self.iter
-            .take()
-            .map(|iter| Ok((Box::new(iter) as FileData, v1_checkpoint_file_path.location)))
+    /// Consumes the iterator and returns the underlying data with the sidecar file path
+    pub fn get_file_data_iter(&mut self) -> DeltaResult<FileDataWithUrl> {
+        match self.iter.take() {
+            Some(iter) => {
+                // Generate a simple sidecar path
+                let file_name = "sidecar.parquet";
+                let sidecar_path = self
+                    .table_location
+                    .join("_delta_log/sidecars/")?
+                    .join(file_name)?;
+
+                Ok((iter, sidecar_path))
+            }
+            None => Err(Error::Generic(
+                "Iterator has already been consumed".to_string(),
+            )),
+        }
+    }
+
+    /// Generates V2 checkpoint files with sidecar metadata
+    /// Transitions from the sidecar generation stage to the final V2 checkpoint stage
+    pub fn sidecar_metadata(
+        self,
+        sidecar_metadata: Vec<Sidecar>,
+        engine: &dyn Engine,
+    ) -> DeltaResult<V2CheckpointFileIterator> {
+        let schema = get_v2_checkpoint_schema();
+
+        // Replay the log segment to get checkpoint actions
+        let inner_iter =
+            self.snapshot
+                .log_segment()
+                .replay(engine, schema.clone(), schema.clone(), None)?;
+
+        // Create action iterator with counter tracking
+        let actions_iter =
+            v2_checkpoint_actions_iter(inner_iter, self.total_actions_counter.clone());
+
+        // Create sidecar action batches from metadata
+        let sidecar_batches = create_sidecar_batches(sidecar_metadata)?;
+
+        // Combine the action iterator with generated sidecar action batches
+        let total_actions_iter = actions_iter.chain(sidecar_batches.into_iter());
+
+        let boxed_total_actions_iter: Box<
+            dyn Iterator<Item = DeltaResult<FilteredEngineData>> + Send,
+        > = Box::new(total_actions_iter);
+
+        // Transition to V2CheckpointFileIterator
+        Ok(V2CheckpointFileIterator {
+            iter: Some(boxed_total_actions_iter),
+            table_root: self.table_location,
+            checkpoint_version: self.snapshot.version(),
+            total_actions_counter: self.total_actions_counter,
+            total_add_actions_counter: self.total_add_actions_counter,
+        })
     }
 }
 
-/// Creates a record batch for the _last_checkpoint.json file.
+/// Final iterator for V2 checkpoint files after sidecar generation
+/// Responsible for writing the main V2 checkpoint file
+pub struct V2CheckpointFileIterator {
+    /// The underlying data iterator, wrapped in Option to allow consumption
+    iter: Option<Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>> + Send>>,
+    /// Root URL of the Delta table
+    table_root: Url,
+    /// Version of the checkpoint
+    checkpoint_version: Version,
+    /// Counter tracking the total number of actions
+    total_actions_counter: Arc<AtomicUsize>,
+    /// Counter tracking the total number of add actions
+    total_add_actions_counter: Arc<AtomicUsize>,
+}
+
+impl V2CheckpointFileIterator {
+    /// Consumes the iterator and returns the underlying data with the V2 checkpoint file path
+    /// This method can only be called once per iterator instance
+    pub fn get_file_data_iter(&mut self) -> DeltaResult<FileDataWithUrl> {
+        match self.iter.take() {
+            Some(iter) => {
+                let file_data = Box::new(iter) as FileData;
+
+                // Generate the V2 checkpoint file path with consistent formatting
+                let checkpoint_path = self.table_root.join("_delta_log/")?.join(&format!(
+                    "{:020}.checkpoint.parquet",
+                    self.checkpoint_version
+                ))?;
+
+                Ok((file_data, checkpoint_path))
+            }
+            None => Err(Error::Generic(
+                "Iterator has already been consumed".to_string(),
+            )),
+        }
+    }
+
+    /// Writes the checkpoint metadata file (_last_checkpoint.json)
+    /// This is the final step in the V2 checkpoint process
+    pub fn checkpoint_metadata(
+        self,
+        metadata: &dyn EngineData,
+        engine: &dyn Engine,
+    ) -> DeltaResult<()> {
+        let last_checkpoint_path = self
+            .table_root
+            .join("_delta_log/")?
+            .join("_last_checkpoint.json")?;
+
+        let data = last_checkpoint_record_batch(
+            self.checkpoint_version,
+            self.total_actions_counter,
+            self.total_add_actions_counter,
+        )?;
+        let iter_data = Box::new(std::iter::once(Ok(data)));
+        engine
+            .get_json_handler()
+            .write_json_file(&last_checkpoint_path, iter_data, true)?;
+
+        Ok(())
+    }
+}
+
+/// Creates batches of sidecar entries from metadata
+/// Each sidecar is converted to a record batch with its path, size and modification time
+fn create_sidecar_batches(
+    metadata: Vec<Sidecar>,
+) -> DeltaResult<Vec<DeltaResult<FilteredEngineData>>> {
+    let mut result = Vec::with_capacity(metadata.len());
+
+    for sidecar in metadata {
+        // Create arrays for each sidecar field
+        let path = Arc::new(StringArray::from(vec![sidecar.path]));
+        let size_in_bytes = Arc::new(Int64Array::from(vec![sidecar.size_in_bytes]));
+        let modification_time = Arc::new(Int64Array::from(vec![sidecar.modification_time]));
+
+        // Create a record batch with the sidecar schema
+        let record_batch = RecordBatch::try_new(
+            Arc::new(get_sidecar_schema().as_ref().try_into()?),
+            vec![path, size_in_bytes, modification_time],
+        )?;
+
+        // Add to results, marking all entries as included (true in the boolean vector)
+        result.push(Ok((
+            Box::new(ArrowEngineData::new(record_batch)) as Box<dyn EngineData>,
+            vec![true],
+        )));
+    }
+
+    Ok(result)
+}
+
+/// Creates a record batch for the _last_checkpoint.json file
+/// This contains metadata about the checkpoint, such as version and size
 fn last_checkpoint_record_batch(
     version: Version,
     total_actions_counter: Arc<AtomicUsize>,
     total_add_actions_counter: Arc<AtomicUsize>,
 ) -> DeltaResult<Box<dyn EngineData>> {
-    let total_actions_counter: i64 =
-        total_actions_counter.load(std::sync::atomic::Ordering::SeqCst) as i64;
-
-    let total_add_actions_counter: i64 =
+    // Load counter values atomically
+    let total_actions = total_actions_counter.load(std::sync::atomic::Ordering::SeqCst) as i64;
+    let total_add_actions =
         total_add_actions_counter.load(std::sync::atomic::Ordering::SeqCst) as i64;
 
-    // TODO: Return error on failure to cast. Look into correcting the types anyways.
+    // Create arrays for each field in the checkpoint metadata
     let version = Arc::new(Int64Array::from(vec![version as i64]));
-    let size = Arc::new(Int64Array::from(vec![total_actions_counter]));
-    // TODO: Parts is usize but we are using i64
+    let size = Arc::new(Int64Array::from(vec![total_actions]));
     let parts = Arc::new(Int64Array::from(vec![1]));
-    let num_of_add_files = Arc::new(Int64Array::from(vec![total_add_actions_counter]));
-    // TODO: Checksum
+    let num_of_add_files = Arc::new(Int64Array::from(vec![total_add_actions]));
 
-    // Construct the record batch.
+    // Construct the record batch with the last checkpoint schema
     let record_batch = RecordBatch::try_new(
         Arc::new(get_last_checkpoint_schema().as_ref().try_into()?),
         vec![
@@ -458,7 +308,7 @@ fn last_checkpoint_record_batch(
             parts,
             Arc::new(Int64Array::from(vec![None])), // Optional: sizeInBytes (checksum column)
             num_of_add_files,
-            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec![None::<&str>])), // Optional: checksum
         ],
     )?;
     Ok(Box::new(ArrowEngineData::new(record_batch)))
