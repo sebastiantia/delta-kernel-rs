@@ -19,12 +19,12 @@ use crate::{DeltaResult, Engine, EngineData, Error, ExpressionEvaluator};
 /// The subset of file action fields that uniquely identifies it in the log, used for deduplication
 /// of adds and removes during log replay.
 #[derive(Debug, Hash, Eq, PartialEq)]
-struct FileActionKey {
-    path: String,
-    dv_unique_id: Option<String>,
+pub(crate) struct FileActionKey {
+    pub(crate) path: String,
+    pub(crate) dv_unique_id: Option<String>,
 }
 impl FileActionKey {
-    fn new(path: impl Into<String>, dv_unique_id: Option<String>) -> Self {
+    pub(crate) fn new(path: impl Into<String>, dv_unique_id: Option<String>) -> Self {
         let path = path.into();
         Self { path, dv_unique_id }
     }
@@ -59,7 +59,7 @@ impl AddRemoveDedupVisitor<'_> {
     /// should be ignored). If not already seen, register it so we can recognize future duplicates.
     /// Returns `true` if we have seen the file and should ignore it, `false` if we have not seen it
     /// and should process it.
-    fn check_and_record_seen(&mut self, key: FileActionKey) -> bool {
+    pub fn check_and_record_seen(&mut self, key: FileActionKey) -> bool {
         // Note: each (add.path + add.dv_unique_id()) pair has a
         // unique Add + Remove pair in the log. For example:
         // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
