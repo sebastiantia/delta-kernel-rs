@@ -824,10 +824,7 @@ mod tests {
         let json_handler = engine.get_json_handler();
         let output_schema = get_log_schema().clone();
         json_handler
-            .parse_json(
-                string_array_to_engine_data(json_strings.into()),
-                output_schema,
-            )
+            .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap()
     }
 
@@ -1197,8 +1194,8 @@ mod tests {
 
         let expected = vec![false, false, false, true, true, false, false, true];
         assert_eq!(visitor.selection_vector, expected);
-        assert_eq!(visitor.seen_metadata, true);
-        assert_eq!(visitor.seen_protocol, true);
+        assert!(visitor.seen_metadata);
+        assert!(visitor.seen_protocol);
         assert_eq!(visitor.seen_txns.len(), 1);
         assert_eq!(visitor.total_actions, 3);
         Ok(())
