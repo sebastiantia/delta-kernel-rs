@@ -59,7 +59,7 @@ impl AddRemoveDedupVisitor<'_> {
     /// should be ignored). If not already seen, register it so we can recognize future duplicates.
     /// Returns `true` if we have seen the file and should ignore it, `false` if we have not seen it
     /// and should process it.
-    pub fn check_and_record_seen(&mut self, key: FileActionKey) -> bool {
+    fn check_and_record_seen(&mut self, key: FileActionKey) -> bool {
         // Note: each (add.path + add.dv_unique_id()) pair has a
         // unique Add + Remove pair in the log. For example:
         // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
