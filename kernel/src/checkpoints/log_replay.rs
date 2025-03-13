@@ -7,9 +7,10 @@ use crate::engine_data::RowVisitor;
 use crate::scan::log_replay::FileActionKey;
 use crate::{DeltaResult, EngineData};
 
-/// `LogReplayForCheckpoints` is responsible for filtering actions during log
+/// `V1CheckpointLogReplayScanner` is responsible for filtering actions during log
 /// replay to include only those that should be included in a V1 checkpoint.
-struct LogReplayForCheckpoints {
+#[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
+struct V1CheckpointLogReplayScanner {
     /// Tracks file actions that have been seen during log replay to avoid duplicates.
     /// Contains (data file path, dv_unique_id) pairs as `FileActionKey` instances.
     seen_file_keys: HashSet<FileActionKey>,
@@ -33,7 +34,8 @@ struct LogReplayForCheckpoints {
     minimum_file_retention_timestamp: i64,
 }
 
-impl LogReplayForCheckpoints {
+#[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
+impl V1CheckpointLogReplayScanner {
     pub(super) fn new(
         total_actions_counter: Arc<AtomicUsize>,
         total_add_actions_counter: Arc<AtomicUsize>,
@@ -65,7 +67,7 @@ impl LogReplayForCheckpoints {
     /// 2. For each app ID, only the most recent transaction action is included
     /// 3. File actions are deduplicated based on path and unique ID
     /// 4. Tombstones older than `minimum_file_retention_timestamp` are excluded
-    pub(super) fn process_v1_checkpoint_batch(
+    pub(super) fn filter_v1_checkpoint_actions(
         &mut self,
         actions: Box<dyn EngineData>,
         is_log_batch: bool,
@@ -125,13 +127,14 @@ impl LogReplayForCheckpoints {
 ///
 /// Note: The iterator of (engine_data, bool) tuples must be sorted by the order of the actions in
 /// the log from most recent to least recent.
+#[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
 pub(crate) fn v1_checkpoint_actions_iter(
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send + 'static,
     total_actions_counter: Arc<AtomicUsize>,
     total_add_actions_counter: Arc<AtomicUsize>,
     minimum_file_retention_timestamp: i64,
 ) -> impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, Vec<bool>)>> + Send + 'static {
-    let mut log_scanner = LogReplayForCheckpoints::new(
+    let mut log_scanner = V1CheckpointLogReplayScanner::new(
         total_actions_counter,
         total_add_actions_counter,
         minimum_file_retention_timestamp,
@@ -140,7 +143,7 @@ pub(crate) fn v1_checkpoint_actions_iter(
     action_iter
         .map(move |action_res| {
             let (batch, is_log_batch) = action_res?;
-            log_scanner.process_v1_checkpoint_batch(batch, is_log_batch)
+            log_scanner.filter_v1_checkpoint_actions(batch, is_log_batch)
         })
         // Only yield batches that have at least one selected row
         .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true)))
@@ -156,7 +159,7 @@ mod tests {
     use crate::utils::test_utils::parse_json_batch;
     use crate::DeltaResult;
 
-    /// Tests the end-to-end processing of multiple batches with various action types
+    /// Tests the end-to-end processing of multiple batches with various action types.
     /// This tests the integration of the visitors with the main iterator function.
     /// More granular testing is performed in the individual visitor tests.
     #[test]
