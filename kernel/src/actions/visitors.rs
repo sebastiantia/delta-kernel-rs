@@ -491,13 +491,13 @@ impl RowVisitor for SidecarVisitor {
 /// actions for that same (path, dvId) pair. If the first action for a given (path, dvId) is a remove
 /// action, we should only include it if it is not expired (i.e., its deletion timestamp is greater
 /// than the minimum file retention timestamp).
-struct CheckpointFileActionsVisitor<'seen> {
-    seen_file_keys: &'seen mut HashSet<FileActionKey>,
-    selection_vector: Vec<bool>,
-    is_log_batch: bool,
-    total_actions: usize,
-    total_add_actions: usize,
-    minimum_file_retention_timestamp: i64,
+pub(crate) struct CheckpointFileActionsVisitor<'seen> {
+    pub(crate) seen_file_keys: &'seen mut HashSet<FileActionKey>,
+    pub(crate) selection_vector: &'seen mut Vec<bool>,
+    pub(crate) is_log_batch: bool,
+    pub(crate) total_actions: usize,
+    pub(crate) total_add_actions: usize,
+    pub(crate) minimum_file_retention_timestamp: i64,
 }
 
 #[allow(unused)] // TODO: Remove flag once used for checkpoint writing
@@ -653,10 +653,10 @@ impl RowVisitor for CheckpointFileActionsVisitor<'_> {
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct CheckpointNonFileActionsVisitor<'seen> {
     // Non-file actions state
-    pub(crate) seen_protocol: bool,
-    pub(crate) seen_metadata: bool,
+    pub(crate) seen_protocol: &'seen mut bool,
+    pub(crate) seen_metadata: &'seen mut bool,
     pub(crate) seen_txns: &'seen mut HashSet<String>,
-    pub(crate) selection_vector: Vec<bool>,
+    pub(crate) selection_vector: &'seen mut Vec<bool>,
     pub(crate) total_actions: usize,
 }
 
@@ -668,8 +668,8 @@ impl CheckpointNonFileActionsVisitor<'_> {
         i: usize,
         getter: &'a dyn GetData<'a>,
     ) -> DeltaResult<bool> {
-        if getter.get_int(i, "protocol.minReaderVersion")?.is_some() && !self.seen_protocol {
-            self.seen_protocol = true;
+        if getter.get_int(i, "protocol.minReaderVersion")?.is_some() && !*self.seen_protocol {
+            *self.seen_protocol = true;
             Ok(true)
         } else {
             Ok(false)
@@ -682,8 +682,8 @@ impl CheckpointNonFileActionsVisitor<'_> {
         i: usize,
         getter: &'a dyn GetData<'a>,
     ) -> DeltaResult<bool> {
-        if getter.get_str(i, "metaData.id")?.is_some() && !self.seen_metadata {
-            self.seen_metadata = true;
+        if getter.get_str(i, "metaData.id")?.is_some() && !*self.seen_metadata {
+            *self.seen_metadata = true;
             Ok(true)
         } else {
             Ok(false)
@@ -777,30 +777,13 @@ pub(crate) fn visit_deletion_vector_at<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use crate::arrow::array::{RecordBatch, StringArray};
-    use crate::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+    use crate::arrow::array::StringArray;
+    use crate::utils::test_utils::parse_json_batch;
+    use crate::EngineData;
 
     use super::*;
-    use crate::{
-        actions::get_log_schema,
-        engine::arrow_data::ArrowEngineData,
-        engine::sync::{json::SyncJsonHandler, SyncEngine},
-        Engine, EngineData, JsonHandler,
-    };
 
-    // TODO(nick): Merge all copies of this into one "test utils" thing
-    fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData> {
-        let string_field = Arc::new(Field::new("a", DataType::Utf8, true));
-        let schema = Arc::new(ArrowSchema::new(vec![string_field]));
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(string_array)])
-            .expect("Can't convert to record batch");
-        Box::new(ArrowEngineData::new(batch))
-    }
-
-    fn action_batch() -> Box<ArrowEngineData> {
-        let handler = SyncJsonHandler {};
+    fn action_batch() -> Box<dyn EngineData> {
         let json_strings: StringArray = vec![
             r#"{"add":{"path":"part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet","partitionValues":{},"size":635,"modificationTime":1677811178336,"dataChange":true,"stats":"{\"numRecords\":10,\"minValues\":{\"value\":0},\"maxValues\":{\"value\":9},\"nullCount\":{\"value\":0},\"tightBounds\":true}","tags":{"INSERTION_TIME":"1677811178336000","MIN_INSERTION_TIME":"1677811178336000","MAX_INSERTION_TIME":"1677811178336000","OPTIMIZE_TARGET_SIZE":"268435456"}}}"#,
             r#"{"remove":{"path":"part-00003-f525f459-34f9-46f5-82d6-d42121d883fd.c000.snappy.parquet","deletionTimestamp":1670892998135,"dataChange":true,"partitionValues":{"c1":"4","c2":"c"},"size":452}}"#, 
@@ -812,20 +795,7 @@ mod tests {
             r#"{"txn":{"appId":"myApp","version": 3}}"#,
         ]
         .into();
-        let output_schema = get_log_schema().clone();
-        let parsed = handler
-            .parse_json(string_array_to_engine_data(json_strings), output_schema)
-            .unwrap();
-        ArrowEngineData::try_from_engine_data(parsed).unwrap()
-    }
-
-    fn parse_json_batch(json_strings: StringArray) -> Box<dyn EngineData> {
-        let engine = SyncEngine::new();
-        let json_handler = engine.get_json_handler();
-        let output_schema = get_log_schema().clone();
-        json_handler
-            .parse_json(string_array_to_engine_data(json_strings), output_schema)
-            .unwrap()
+        parse_json_batch(json_strings)
     }
 
     #[test]
@@ -1039,7 +1009,7 @@ mod tests {
         let data = action_batch();
         let mut visitor = CheckpointFileActionsVisitor {
             seen_file_keys: &mut HashSet::new(),
-            selection_vector: vec![false; 8], // 8 rows in the action batch
+            selection_vector: &mut vec![false; 8], // 8 rows in the action batch
             is_log_batch: true,
             total_actions: 0,
             total_add_actions: 0,
@@ -1049,7 +1019,7 @@ mod tests {
         visitor.visit_rows_of(data.as_ref())?;
 
         let expected = vec![true, true, false, false, false, false, false, false];
-        assert_eq!(visitor.selection_vector, expected);
+        assert_eq!(*visitor.selection_vector, expected);
         assert_eq!(visitor.seen_file_keys.len(), 2);
         assert_eq!(visitor.total_actions, 2);
         assert_eq!(visitor.total_add_actions, 1);
@@ -1070,7 +1040,7 @@ mod tests {
 
         let mut visitor = CheckpointFileActionsVisitor {
             seen_file_keys: &mut HashSet::new(),
-            selection_vector: vec![false; 4],
+            selection_vector: &mut vec![false; 4],
             is_log_batch: true,
             total_actions: 0,
             total_add_actions: 0,
@@ -1080,7 +1050,7 @@ mod tests {
         visitor.visit_rows_of(batch.as_ref())?;
 
         let expected = vec![false, false, true, false]; // Only "one_above_threshold" should be kept
-        assert_eq!(visitor.selection_vector, expected);
+        assert_eq!(*visitor.selection_vector, expected);
         assert_eq!(visitor.seen_file_keys.len(), 4); // All are recorded as seen even if expired
         assert_eq!(visitor.total_actions, 1);
         assert_eq!(visitor.total_add_actions, 0);
@@ -1099,7 +1069,7 @@ mod tests {
 
         let mut visitor = CheckpointFileActionsVisitor {
             seen_file_keys: &mut HashSet::new(),
-            selection_vector: vec![false; 2],
+            selection_vector: &mut vec![false; 2],
             is_log_batch: true, // Log batch
             total_actions: 0,
             total_add_actions: 0,
@@ -1110,7 +1080,7 @@ mod tests {
 
         // First one should be included, second one skipped as a duplicate
         let expected = vec![true, false];
-        assert_eq!(visitor.selection_vector, expected);
+        assert_eq!(*visitor.selection_vector, expected);
         assert_eq!(visitor.seen_file_keys.len(), 1);
         assert_eq!(visitor.total_actions, 1);
         assert_eq!(visitor.total_add_actions, 1);
@@ -1130,7 +1100,7 @@ mod tests {
 
         let mut visitor = CheckpointFileActionsVisitor {
             seen_file_keys: &mut HashSet::new(),
-            selection_vector: vec![false; 2],
+            selection_vector: &mut vec![false; 2],
             is_log_batch: false, // Checkpoint batch
             total_actions: 0,
             total_add_actions: 0,
@@ -1141,7 +1111,7 @@ mod tests {
 
         // Both should be included since we don't track duplicates in checkpoint batches
         let expected = vec![true, true];
-        assert_eq!(visitor.selection_vector, expected);
+        assert_eq!(*visitor.selection_vector, expected);
         assert_eq!(visitor.seen_file_keys.len(), 0); // No tracking for checkpoint batches
         assert_eq!(visitor.total_actions, 2);
         assert_eq!(visitor.total_add_actions, 2);
@@ -1162,7 +1132,7 @@ mod tests {
 
         let mut visitor = CheckpointFileActionsVisitor {
             seen_file_keys: &mut HashSet::new(),
-            selection_vector: vec![false; 3],
+            selection_vector: &mut vec![false; 3],
             is_log_batch: true,
             total_actions: 0,
             total_add_actions: 0,
@@ -1172,7 +1142,7 @@ mod tests {
         visitor.visit_rows_of(batch.as_ref())?;
 
         let expected = vec![true, true, false]; // Third one is a duplicate
-        assert_eq!(visitor.selection_vector, expected);
+        assert_eq!(*visitor.selection_vector, expected);
         assert_eq!(visitor.seen_file_keys.len(), 2);
         assert_eq!(visitor.total_actions, 2);
         assert_eq!(visitor.total_add_actions, 2);
@@ -1183,19 +1153,19 @@ mod tests {
     fn test_parse_checkpoint_non_file_actions_visitor() -> DeltaResult<()> {
         let data = action_batch();
         let mut visitor = CheckpointNonFileActionsVisitor {
-            seen_protocol: false,
-            seen_metadata: false,
+            seen_protocol: &mut false,
+            seen_metadata: &mut false,
             seen_txns: &mut HashSet::new(),
-            selection_vector: vec![false; 8],
+            selection_vector: &mut vec![false; 8],
             total_actions: 0,
         };
 
         visitor.visit_rows_of(data.as_ref())?;
 
         let expected = vec![false, false, false, true, true, false, false, true];
-        assert_eq!(visitor.selection_vector, expected);
-        assert!(visitor.seen_metadata);
-        assert!(visitor.seen_protocol);
+        assert_eq!(*visitor.selection_vector, expected);
+        assert!(*visitor.seen_metadata);
+        assert!(*visitor.seen_protocol);
         assert_eq!(visitor.seen_txns.len(), 1);
         assert_eq!(visitor.total_actions, 3);
         Ok(())
@@ -1212,17 +1182,17 @@ mod tests {
         seen_txns.insert("app1".to_string());
 
         let mut visitor = CheckpointNonFileActionsVisitor {
-            seen_protocol: false,
-            seen_metadata: false,
+            seen_protocol: &mut false,
+            seen_metadata: &mut false,
             seen_txns: &mut seen_txns,
-            selection_vector: vec![false; 1],
+            selection_vector: &mut vec![false; 1],
             total_actions: 0,
         };
 
         visitor.visit_rows_of(batch.as_ref())?;
 
         let expected = vec![false]; // Transaction should be skipped as it's already seen
-        assert_eq!(visitor.selection_vector, expected);
+        assert_eq!(*visitor.selection_vector, expected);
         assert_eq!(visitor.seen_txns.len(), 1); // Still only one transaction
         assert_eq!(visitor.total_actions, 0);
         Ok(())
@@ -1240,17 +1210,17 @@ mod tests {
 
         // Set protocol and metadata as already seen
         let mut visitor = CheckpointNonFileActionsVisitor {
-            seen_protocol: true, // Already seen
-            seen_metadata: true, // Already seen
+            seen_protocol: &mut true, // Already seen
+            seen_metadata: &mut true, // Already seen
             seen_txns: &mut HashSet::new(),
-            selection_vector: vec![false; 2],
+            selection_vector: &mut vec![false; 2],
             total_actions: 0,
         };
 
         visitor.visit_rows_of(batch.as_ref())?;
 
         let expected = vec![false, false]; // Both should be skipped
-        assert_eq!(visitor.selection_vector, expected);
+        assert_eq!(*visitor.selection_vector, expected);
         assert_eq!(visitor.total_actions, 0);
         Ok(())
     }
