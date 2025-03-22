@@ -784,10 +784,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        actions::get_log_schema,
-        engine::arrow_data::ArrowEngineData,
-        engine::sync::{json::SyncJsonHandler, SyncEngine},
-        Engine, EngineData, JsonHandler,
+        actions::get_log_schema, engine::arrow_data::ArrowEngineData, engine::sync::SyncEngine,
+        Engine, EngineData,
     };
 
     // TODO(nick): Merge all copies of this into one "test utils" thing
@@ -799,8 +797,7 @@ mod tests {
         Box::new(ArrowEngineData::new(batch))
     }
 
-    fn action_batch() -> Box<ArrowEngineData> {
-        let handler = SyncJsonHandler {};
+    fn action_batch() -> Box<dyn EngineData> {
         let json_strings: StringArray = vec![
             r#"{"add":{"path":"part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet","partitionValues":{},"size":635,"modificationTime":1677811178336,"dataChange":true,"stats":"{\"numRecords\":10,\"minValues\":{\"value\":0},\"maxValues\":{\"value\":9},\"nullCount\":{\"value\":0},\"tightBounds\":true}","tags":{"INSERTION_TIME":"1677811178336000","MIN_INSERTION_TIME":"1677811178336000","MAX_INSERTION_TIME":"1677811178336000","OPTIMIZE_TARGET_SIZE":"268435456"}}}"#,
             r#"{"remove":{"path":"part-00003-f525f459-34f9-46f5-82d6-d42121d883fd.c000.snappy.parquet","deletionTimestamp":1670892998135,"dataChange":true,"partitionValues":{"c1":"4","c2":"c"},"size":452}}"#, 
@@ -812,11 +809,7 @@ mod tests {
             r#"{"txn":{"appId":"myApp","version": 3}}"#,
         ]
         .into();
-        let output_schema = get_log_schema().clone();
-        let parsed = handler
-            .parse_json(string_array_to_engine_data(json_strings), output_schema)
-            .unwrap();
-        ArrowEngineData::try_from_engine_data(parsed).unwrap()
+        parse_json_batch(json_strings)
     }
 
     fn parse_json_batch(json_strings: StringArray) -> Box<dyn EngineData> {
@@ -1202,26 +1195,30 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_non_file_actions_visitor_txn_already_seen() -> DeltaResult<()> {
-        let json_strings: StringArray =
-            vec![r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#].into();
+    fn test_checkpoint_non_file_actions_visitor_already_seen_actions() -> DeltaResult<()> {
+        let json_strings: StringArray = vec![
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
+            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
+            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
+        ].into();
         let batch = parse_json_batch(json_strings);
 
-        // Pre-populate with app1
+        // Pre-populate with txn app1
         let mut seen_txns = HashSet::new();
         seen_txns.insert("app1".to_string());
 
         let mut visitor = CheckpointNonFileActionsVisitor {
-            seen_protocol: false,
-            seen_metadata: false,
+            seen_protocol: true, // Already seen
+            seen_metadata: true, // Already seen
             seen_txns: &mut seen_txns,
-            selection_vector: vec![false; 1],
+            selection_vector: vec![false; 3],
             total_actions: 0,
         };
 
         visitor.visit_rows_of(batch.as_ref())?;
 
-        let expected = vec![false]; // Transaction should be skipped as it's already seen
+        // All actions should be skipped as they have already been seen
+        let expected = vec![false; 3];
         assert_eq!(visitor.selection_vector, expected);
         assert_eq!(visitor.seen_txns.len(), 1); // Still only one transaction
         assert_eq!(visitor.total_actions, 0);
@@ -1229,29 +1226,32 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_non_file_actions_visitor_protocol_and_metadata_already_seen(
-    ) -> DeltaResult<()> {
+    fn test_checkpoint_non_file_actions_visitor_duplicate_non_file_actions() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
             r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
-            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{"delta.enableDeletionVectors":"true","delta.columnMapping.mode":"none", "delta.enableChangeDataFeed":"true"},"createdTime":1677811175819}}"#,
+            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
+            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
+            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
         ]
         .into();
         let batch = parse_json_batch(json_strings);
 
-        // Set protocol and metadata as already seen
         let mut visitor = CheckpointNonFileActionsVisitor {
-            seen_protocol: true, // Already seen
-            seen_metadata: true, // Already seen
-            seen_txns: &mut HashSet::new(),
-            selection_vector: vec![false; 2],
+            seen_protocol: false,
+            seen_metadata: false,
+            seen_txns: &mut HashSet::new(), // Empty set
+            selection_vector: vec![false; 6],
             total_actions: 0,
         };
 
         visitor.visit_rows_of(batch.as_ref())?;
 
-        let expected = vec![false, false]; // Both should be skipped
+        let expected = vec![true, false, true, false, true, false];
         assert_eq!(visitor.selection_vector, expected);
-        assert_eq!(visitor.total_actions, 0);
+        assert_eq!(visitor.seen_txns.len(), 1);
+        assert_eq!(visitor.total_actions, 3);
         Ok(())
     }
 }
