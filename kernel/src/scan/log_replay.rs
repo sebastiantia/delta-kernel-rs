@@ -11,7 +11,7 @@ use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
 use crate::log_replay::{FileActionKey, FileActionVisitor, LogReplayProcessor};
 use crate::predicates::{DefaultPredicateEvaluator, PredicateEvaluator as _};
-use crate::scan::{DeletionVectorDescriptor, Scalar, TransformExpr};
+use crate::scan::{Scalar, TransformExpr};
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
 use crate::utils::require;
 use crate::{DeltaResult, Engine, EngineData, Error, ExpressionEvaluator};

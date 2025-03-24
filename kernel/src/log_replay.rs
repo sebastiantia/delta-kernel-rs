@@ -1,16 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, LazyLock,
-};
-
-use itertools::Itertools;
+use std::collections::HashSet;
 use tracing::debug;
 
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
-use crate::actions::get_log_add_schema;
-use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
-use crate::{DeltaResult, Engine, EngineData, Error, ExpressionEvaluator};
+use crate::engine_data::{GetData, TypedGetData as _};
+use crate::{DeltaResult, EngineData, Error};
 
 #[derive(Debug, Hash, Eq, PartialEq)]
 /// The subset of file action fields that uniquely identifies it in the log, used for deduplication
