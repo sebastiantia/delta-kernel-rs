@@ -78,6 +78,7 @@ pub mod checkpoints;
 pub mod engine_data;
 pub mod error;
 pub mod expressions;
+pub mod log_replay;
 pub mod scan;
 pub mod schema;
 pub mod snapshot;

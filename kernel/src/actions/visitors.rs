@@ -3,10 +3,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
-use tracing::debug;
 
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
-use crate::scan::log_replay::FileActionKey;
+use crate::log_replay::{FileActionKey, FileActionVisitor};
 use crate::schema::{column_name, ColumnName, ColumnNamesAndTypes, DataType};
 use crate::utils::require;
 use crate::{DeltaResult, Error};
@@ -500,40 +499,30 @@ pub(crate) struct CheckpointFileActionsVisitor<'seen> {
     pub(crate) minimum_file_retention_timestamp: i64,
 }
 
-#[allow(unused)] // TODO: Remove flag once used for checkpoint writing
-impl CheckpointFileActionsVisitor<'_> {
-    /// Checks if log replay already processed this logical file (in which case the current action
-    /// should be ignored). If not already seen, register it so we can recognize future duplicates.
-    /// Returns `true` if we have seen the file and should ignore it, `false` if we have not seen it
-    /// and should process it.
-    ///
-    /// TODO: This method is a duplicate of AddRemoveDedupVisior's method!
-    fn check_and_record_seen(&mut self, key: FileActionKey) -> bool {
-        // Note: each (add.path + add.dv_unique_id()) pair has a
-        // unique Add + Remove pair in the log. For example:
-        // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
-
-        if self.seen_file_keys.contains(&key) {
-            debug!(
-                "Ignoring duplicate ({}, {:?}) in scan, is log {}",
-                key.path, key.dv_unique_id, self.is_log_batch
-            );
-            true
-        } else {
-            debug!(
-                "Including ({}, {:?}) in scan, is log {}",
-                key.path, key.dv_unique_id, self.is_log_batch
-            );
-            if self.is_log_batch {
-                // Remember file actions from this batch so we can ignore duplicates as we process
-                // batches from older commit and/or checkpoint files. We don't track checkpoint
-                // batches because they are already the oldest actions and never replace anything.
-                self.seen_file_keys.insert(key);
-            }
-            false
-        }
+impl FileActionVisitor for CheckpointFileActionsVisitor<'_> {
+    fn seen_file_keys(&mut self) -> &mut HashSet<FileActionKey> {
+        self.seen_file_keys
     }
 
+    fn add_path_index(&self) -> usize {
+        0
+    }
+
+    fn remove_path_index(&self) -> Option<usize> {
+        Some(4)
+    }
+
+    fn add_dv_start_index(&self) -> usize {
+        1
+    }
+
+    fn remove_dv_start_index(&self) -> Option<usize> {
+        Some(6)
+    }
+}
+
+#[allow(unused)] // TODO: Remove flag once used for checkpoint writing
+impl CheckpointFileActionsVisitor<'_> {
     /// A remove action includes a timestamp indicating when the deletion occurred. Physical files  
     /// are deleted lazily after a user-defined expiration time, allowing concurrent readers to  
     /// access stale snapshots. A remove action remains as a tombstone in a checkpoint file until
@@ -556,29 +545,14 @@ impl CheckpointFileActionsVisitor<'_> {
         i: usize,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<bool> {
-        // Add will have a path at index 0 if it is valid; otherwise we may
-        // have a remove with a path at index 4. In either case, extract the three dv getters at
-        // indexes that immediately follow a valid path index.
-        let (path, dv_getters, is_add) = if let Some(path) = getters[0].get_str(i, "add.path")? {
-            (path, &getters[1..4], true)
-        } else if let Some(path) = getters[4].get_opt(i, "remove.path")? {
-            (path, &getters[6..9], false)
-        } else {
+        // Retrieve the file action key and whether it is an add action
+        let Some((file_key, is_add)) = self.extract_file_action(i, getters)? else {
+            // Not a file action
             return Ok(false);
         };
 
-        let dv_unique_id = match dv_getters[0].get_opt(i, "deletionVector.storageType")? {
-            Some(storage_type) => Some(DeletionVectorDescriptor::unique_id_from_parts(
-                storage_type,
-                dv_getters[1].get(i, "deletionVector.pathOrInlineDv")?,
-                dv_getters[2].get_opt(i, "deletionVector.offset")?,
-            )),
-            None => None,
-        };
-
         // Check both adds and removes (skipping already-seen)
-        let file_key = FileActionKey::new(path, dv_unique_id);
-        if self.check_and_record_seen(file_key) {
+        if self.check_and_record_seen(file_key, self.is_log_batch) {
             return Ok(false);
         }
 
