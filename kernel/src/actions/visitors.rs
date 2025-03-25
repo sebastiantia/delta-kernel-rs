@@ -492,9 +492,7 @@ impl RowVisitor for SidecarVisitor {
 /// action, we should only include it if it is not expired (i.e., its deletion timestamp is greater
 /// than the minimum file retention timestamp).
 struct CheckpointFileActionsVisitor<'seen> {
-    seen_file_keys: &'seen mut HashSet<FileActionKey>,
-    selection_vector: Vec<bool>,
-    is_log_batch: bool,
+    deduplicator: FileActionDeduplicator<'seen>,
     total_actions: usize,
     total_add_actions: usize,
     minimum_file_retention_timestamp: i64,
@@ -502,35 +500,22 @@ struct CheckpointFileActionsVisitor<'seen> {
 
 #[allow(unused)] // TODO: Remove flag once used for checkpoint writing
 impl CheckpointFileActionsVisitor<'_> {
-    /// Checks if log replay already processed this logical file (in which case the current action
-    /// should be ignored). If not already seen, register it so we can recognize future duplicates.
-    /// Returns `true` if we have seen the file and should ignore it, `false` if we have not seen it
-    /// and should process it.
-    ///
-    /// TODO: This method is a duplicate of AddRemoveDedupVisior's method!
-    fn check_and_record_seen(&mut self, key: FileActionKey) -> bool {
-        // Note: each (add.path + add.dv_unique_id()) pair has a
-        // unique Add + Remove pair in the log. For example:
-        // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
-
-        if self.seen_file_keys.contains(&key) {
-            debug!(
-                "Ignoring duplicate ({}, {:?}) in scan, is log {}",
-                key.path, key.dv_unique_id, self.is_log_batch
-            );
-            true
-        } else {
-            debug!(
-                "Including ({}, {:?}) in scan, is log {}",
-                key.path, key.dv_unique_id, self.is_log_batch
-            );
-            if self.is_log_batch {
-                // Remember file actions from this batch so we can ignore duplicates as we process
-                // batches from older commit and/or checkpoint files. We don't track checkpoint
-                // batches because they are already the oldest actions and never replace anything.
-                self.seen_file_keys.insert(key);
-            }
-            false
+    /// Create a new CheckpointFileActionsVisitor
+    fn new(
+        seen_file_keys: &mut HashSet<FileActionKey>,
+        selection_vector: Vec<bool>,
+        is_log_batch: bool,
+        minimum_file_retention_timestamp: i64,
+    ) -> CheckpointFileActionsVisitor<'_> {
+        CheckpointFileActionsVisitor {
+            deduplicator: FileActionDeduplicator::new(
+                seen_file_keys,
+                selection_vector,
+                is_log_batch,
+            ),
+            total_actions: 0,
+            total_add_actions: 0,
+            minimum_file_retention_timestamp,
         }
     }
 
@@ -556,29 +541,17 @@ impl CheckpointFileActionsVisitor<'_> {
         i: usize,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<bool> {
-        // Add will have a path at index 0 if it is valid; otherwise we may
-        // have a remove with a path at index 4. In either case, extract the three dv getters at
-        // indexes that immediately follow a valid path index.
-        let (path, dv_getters, is_add) = if let Some(path) = getters[0].get_str(i, "add.path")? {
-            (path, &getters[1..4], true)
-        } else if let Some(path) = getters[4].get_opt(i, "remove.path")? {
-            (path, &getters[6..9], false)
-        } else {
+        let Some((file_key, is_add)) = self.deduplicator.extract_file_action(
+            i, getters, 0,     // add_path_index
+            4,     // remove_path_index
+            1,     // add_dv_start_index
+            6,     // remove_dv_start_index
+            false, // Never skip remove actions (even if we're processing a log batch)
+        )?
+        else {
             return Ok(false);
         };
-
-        let dv_unique_id = match dv_getters[0].get_opt(i, "deletionVector.storageType")? {
-            Some(storage_type) => Some(DeletionVectorDescriptor::unique_id_from_parts(
-                storage_type,
-                dv_getters[1].get(i, "deletionVector.pathOrInlineDv")?,
-                dv_getters[2].get_opt(i, "deletionVector.offset")?,
-            )),
-            None => None,
-        };
-
-        // Check both adds and removes (skipping already-seen)
-        let file_key = FileActionKey::new(path, dv_unique_id);
-        if self.check_and_record_seen(file_key) {
+        if self.deduplicator.check_and_record_seen(file_key) {
             return Ok(false);
         }
 
@@ -634,11 +607,150 @@ impl RowVisitor for CheckpointFileActionsVisitor<'_> {
             let should_select = self.is_valid_file_action(i, getters)?;
 
             if should_select {
-                self.selection_vector[i] = true;
+                self.deduplicator.selection_vector[i] = true;
                 self.total_actions += 1;
             }
         }
         Ok(())
+    }
+}
+
+/// Core implementation for deduplicating file actions in Delta log replay
+/// This struct extracts the common functionality from the CheckpointVisitor
+/// and the ScanDataVisitor.
+pub(crate) struct FileActionDeduplicator<'seen> {
+    /// A set of (data file path, dv_unique_id) pairs that have been seen thus
+    /// far in the log for deduplication
+    seen_file_keys: &'seen mut HashSet<FileActionKey>,
+    /// Selection vector to track which rows should be included
+    selection_vector: Vec<bool>,
+    /// Whether we're processing a log batch (as opposed to a checkpoint)
+    is_log_batch: bool,
+}
+
+impl<'seen> FileActionDeduplicator<'seen> {
+    pub(crate) fn new(
+        seen_file_keys: &'seen mut HashSet<FileActionKey>,
+        selection_vector: Vec<bool>,
+        is_log_batch: bool,
+    ) -> Self {
+        Self {
+            seen_file_keys,
+            selection_vector,
+            is_log_batch,
+        }
+    }
+
+    /// Checks if log replay already processed this logical file (in which case the current action
+    /// should be ignored). If not already seen, register it so we can recognize future duplicates.
+    /// Returns `true` if we have seen the file and should ignore it, `false` if we have not seen it
+    /// and should process it.
+    pub(crate) fn check_and_record_seen(&mut self, key: FileActionKey) -> bool {
+        // Note: each (add.path + add.dv_unique_id()) pair has a
+        // unique Add + Remove pair in the log. For example:
+        // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
+
+        if self.seen_file_keys.contains(&key) {
+            debug!(
+                "Ignoring duplicate ({}, {:?}) in scan, is log {}",
+                key.path, key.dv_unique_id, self.is_log_batch
+            );
+            true
+        } else {
+            debug!(
+                "Including ({}, {:?}) in scan, is log {}",
+                key.path, key.dv_unique_id, self.is_log_batch
+            );
+            if self.is_log_batch {
+                // Remember file actions from this batch so we can ignore duplicates as we process
+                // batches from older commit and/or checkpoint files. We don't track checkpoint
+                // batches because they are already the oldest actions and never replace anything.
+                self.seen_file_keys.insert(key);
+            }
+            false
+        }
+    }
+
+    /// Extract deletion vector unique ID
+    fn extract_dv_unique_id<'a>(
+        &self,
+        i: usize,
+        getters: &[&'a dyn GetData<'a>],
+        add_dv_start_index: Option<usize>,
+        remove_dv_start_index: Option<usize>,
+    ) -> DeltaResult<Option<String>> {
+        // Get the starting index based on action type
+        let start_idx = add_dv_start_index
+            .or(remove_dv_start_index)
+            .ok_or_else(|| Error::GenericError {
+                source: "starting indices for add/remove DVs should have been passed".into(),
+            })?;
+
+        // Extract the DV unique ID
+        match getters[start_idx].get_opt(i, "deletionVector.storageType")? {
+            Some(storage_type) => Ok(Some(DeletionVectorDescriptor::unique_id_from_parts(
+                storage_type,
+                getters[start_idx + 1].get(i, "deletionVector.pathOrInlineDv")?,
+                getters[start_idx + 2].get_opt(i, "deletionVector.offset")?,
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    /// Extract file action key and determine if it's an add operation
+    pub(crate) fn extract_file_action<'a>(
+        &self,
+        i: usize,
+        getters: &[&'a dyn GetData<'a>],
+        add_path_index: usize,
+        remove_path_index: usize,
+        add_dv_start_index: usize,
+        remove_dv_start_index: usize,
+        skip_removes: bool,
+    ) -> DeltaResult<Option<(FileActionKey, bool)>> {
+        // Try to extract an add action path
+        if let Some(path) = getters[add_path_index].get_str(i, "add.path")? {
+            let dv_unique_id =
+                self.extract_dv_unique_id(i, getters, Some(add_dv_start_index), None)?;
+            return Ok(Some((FileActionKey::new(path, dv_unique_id), true)));
+        }
+
+        // The AddRemoveDedupVisitor does not include remove action getters when
+        // dealing with non-log batches (since they are not needed for deduplication).
+        // In this case, we should skip remove actions.
+        if skip_removes {
+            return Ok(None);
+        }
+
+        // Try to extract a remove action path
+        if let Some(path) = getters[remove_path_index].get_str(i, "remove.path")? {
+            let dv_unique_id =
+                self.extract_dv_unique_id(i, getters, None, Some(remove_dv_start_index))?;
+            return Ok(Some((FileActionKey::new(path, dv_unique_id), false)));
+        }
+
+        // If we didn't find an add or remove action, return None
+        return Ok(None);
+    }
+
+    /// Get the selection vector
+    pub(crate) fn selection_vector(self) -> Vec<bool> {
+        self.selection_vector
+    }
+
+    /// Get reference to the selection vector
+    pub(crate) fn selection_vector_ref(&self) -> &Vec<bool> {
+        &self.selection_vector
+    }
+
+    /// Get mutable reference to the selection vector
+    pub(crate) fn selection_vector_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.selection_vector
+    }
+
+    /// Get whether we are processing a log batch
+    pub(crate) fn is_log_batch(&self) -> bool {
+        self.is_log_batch
     }
 }
 
@@ -1030,10 +1142,13 @@ mod tests {
     #[test]
     fn test_parse_checkpoint_file_action_visitor() -> DeltaResult<()> {
         let data = action_batch();
-        let mut visitor = CheckpointFileActionsVisitor {
+        let deduplicator = FileActionDeduplicator {
             seen_file_keys: &mut HashSet::new(),
-            selection_vector: vec![false; 8], // 8 rows in the action batch
+            selection_vector: vec![false; 8],
             is_log_batch: true,
+        };
+        let mut visitor = CheckpointFileActionsVisitor {
+            deduplicator,
             total_actions: 0,
             total_add_actions: 0,
             minimum_file_retention_timestamp: 0, // No tombstones are expired
@@ -1042,8 +1157,8 @@ mod tests {
         visitor.visit_rows_of(data.as_ref())?;
 
         let expected = vec![true, true, false, false, false, false, false, false];
-        assert_eq!(visitor.selection_vector, expected);
-        assert_eq!(visitor.seen_file_keys.len(), 2);
+        assert_eq!(visitor.deduplicator.seen_file_keys.len(), 2);
+        assert_eq!(visitor.deduplicator.selection_vector(), expected);
         assert_eq!(visitor.total_actions, 2);
         assert_eq!(visitor.total_add_actions, 1);
         Ok(())
@@ -1061,10 +1176,13 @@ mod tests {
         .into();
         let batch = parse_json_batch(json_strings);
 
-        let mut visitor = CheckpointFileActionsVisitor {
+        let deduplicator = FileActionDeduplicator {
             seen_file_keys: &mut HashSet::new(),
             selection_vector: vec![false; 4],
             is_log_batch: true,
+        };
+        let mut visitor = CheckpointFileActionsVisitor {
+            deduplicator,
             total_actions: 0,
             total_add_actions: 0,
             minimum_file_retention_timestamp: 100, // Threshold set to 100
@@ -1073,8 +1191,8 @@ mod tests {
         visitor.visit_rows_of(batch.as_ref())?;
 
         let expected = vec![false, false, true, false]; // Only "one_above_threshold" should be kept
-        assert_eq!(visitor.selection_vector, expected);
-        assert_eq!(visitor.seen_file_keys.len(), 4); // All are recorded as seen even if expired
+        assert_eq!(visitor.deduplicator.seen_file_keys.len(), 4); // All are recorded as seen even if expired
+        assert_eq!(visitor.deduplicator.selection_vector(), expected);
         assert_eq!(visitor.total_actions, 1);
         assert_eq!(visitor.total_add_actions, 0);
         Ok(())
@@ -1090,10 +1208,13 @@ mod tests {
         .into();
         let batch = parse_json_batch(json_strings);
 
-        let mut visitor = CheckpointFileActionsVisitor {
+        let deduplicator = FileActionDeduplicator {
             seen_file_keys: &mut HashSet::new(),
             selection_vector: vec![false; 2],
-            is_log_batch: true, // Log batch
+            is_log_batch: true,
+        };
+        let mut visitor = CheckpointFileActionsVisitor {
+            deduplicator,
             total_actions: 0,
             total_add_actions: 0,
             minimum_file_retention_timestamp: 0,
@@ -1103,8 +1224,8 @@ mod tests {
 
         // First one should be included, second one skipped as a duplicate
         let expected = vec![true, false];
-        assert_eq!(visitor.selection_vector, expected);
-        assert_eq!(visitor.seen_file_keys.len(), 1);
+        assert_eq!(visitor.deduplicator.seen_file_keys.len(), 1);
+        assert_eq!(visitor.deduplicator.selection_vector(), expected);
         assert_eq!(visitor.total_actions, 1);
         assert_eq!(visitor.total_add_actions, 1);
         Ok(())
@@ -1121,10 +1242,13 @@ mod tests {
         .into();
         let batch = parse_json_batch(json_strings);
 
-        let mut visitor = CheckpointFileActionsVisitor {
+        let deduplicator = FileActionDeduplicator {
             seen_file_keys: &mut HashSet::new(),
             selection_vector: vec![false; 2],
-            is_log_batch: false, // Checkpoint batch
+            is_log_batch: false,
+        };
+        let mut visitor = CheckpointFileActionsVisitor {
+            deduplicator,
             total_actions: 0,
             total_add_actions: 0,
             minimum_file_retention_timestamp: 0,
@@ -1134,8 +1258,8 @@ mod tests {
 
         // Both should be included since we don't track duplicates in checkpoint batches
         let expected = vec![true, true];
-        assert_eq!(visitor.selection_vector, expected);
-        assert_eq!(visitor.seen_file_keys.len(), 0); // No tracking for checkpoint batches
+        assert_eq!(visitor.deduplicator.seen_file_keys.len(), 0); // No tracking for checkpoint batches
+        assert_eq!(visitor.deduplicator.selection_vector(), expected);
         assert_eq!(visitor.total_actions, 2);
         assert_eq!(visitor.total_add_actions, 2);
         Ok(())
@@ -1152,11 +1276,13 @@ mod tests {
         ]
         .into();
         let batch = parse_json_batch(json_strings);
-
-        let mut visitor = CheckpointFileActionsVisitor {
+        let deduplicator = FileActionDeduplicator {
             seen_file_keys: &mut HashSet::new(),
             selection_vector: vec![false; 3],
             is_log_batch: true,
+        };
+        let mut visitor = CheckpointFileActionsVisitor {
+            deduplicator,
             total_actions: 0,
             total_add_actions: 0,
             minimum_file_retention_timestamp: 0,
@@ -1165,8 +1291,8 @@ mod tests {
         visitor.visit_rows_of(batch.as_ref())?;
 
         let expected = vec![true, true, false]; // Third one is a duplicate
-        assert_eq!(visitor.selection_vector, expected);
-        assert_eq!(visitor.seen_file_keys.len(), 2);
+        assert_eq!(visitor.deduplicator.seen_file_keys.len(), 2);
+        assert_eq!(visitor.deduplicator.selection_vector(), expected);
         assert_eq!(visitor.total_actions, 2);
         assert_eq!(visitor.total_add_actions, 2);
         Ok(())
