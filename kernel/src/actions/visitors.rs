@@ -484,38 +484,61 @@ impl RowVisitor for SidecarVisitor {
         Ok(())
     }
 }
-
-/// A visitor that deduplicates a stream of add and remove actions into a stream of valid adds and
-/// removes to be included in a checkpoint file. Log replay visits actions newest-first, so once
-/// we've seen a file action for a given (path, dvId) pair, we should ignore all subsequent (older)
-/// actions for that same (path, dvId) pair. If the first action for a given (path, dvId) is a remove
-/// action, we should only include it if it is not expired (i.e., its deletion timestamp is greater
-/// than the minimum file retention timestamp).
-struct CheckpointFileActionsVisitor<'seen> {
-    deduplicator: FileActionDeduplicator<'seen>,
-    total_actions: usize,
+/// A visitor that filters actions for inclusion in a checkpoint file.
+///
+/// This visitor processes actions in newest-to-oldest order (as they appear in log
+/// replay) and applies deduplication logic for both file and non-file actions.
+///
+/// # File Action Filtering
+/// - Keeps only the first occurrence of each unique (path, dvId) pair
+/// - Excludes expired tombstone remove actions (where deletionTimestamp ≤ minimumFileRetentionTimestamp)
+///
+/// # Non-File Action Filtering
+/// - Keeps only the first protocol action
+/// - Keeps only the first metadata action
+/// - Keeps only the first transaction action for each unique app ID
+///
+/// This filtered set of actions represents the minimal set needed to reconstruct
+/// the latest valid state of the table.
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+pub(crate) struct CheckpointVisitor<'seen> {
+    // File actions deduplication state
+    file_deduplicator: FileActionDeduplicator<'seen>,
+    total_file_actions: usize,
     total_add_actions: usize,
     minimum_file_retention_timestamp: i64,
+
+    // Non-file actions deduplication state
+    seen_protocol: bool,
+    seen_metadata: bool,
+    seen_txns: &'seen mut HashSet<String>,
+    total_non_file_actions: usize,
 }
 
-#[allow(unused)] // TODO: Remove flag once used for checkpoint writing
-impl CheckpointFileActionsVisitor<'_> {
-    /// Create a new CheckpointFileActionsVisitor
-    fn new(
-        seen_file_keys: &mut HashSet<FileActionKey>,
+#[allow(unused)]
+impl CheckpointVisitor<'_> {
+    /// Create a new CheckpointVisitor
+    fn new<'seen>(
+        seen_file_keys: &'seen mut HashSet<FileActionKey>,
+        seen_txns: &'seen mut HashSet<String>,
         selection_vector: Vec<bool>,
         is_log_batch: bool,
         minimum_file_retention_timestamp: i64,
-    ) -> CheckpointFileActionsVisitor<'_> {
-        CheckpointFileActionsVisitor {
-            deduplicator: FileActionDeduplicator::new(
+    ) -> CheckpointVisitor<'seen> {
+        CheckpointVisitor {
+            file_deduplicator: FileActionDeduplicator::new(
                 seen_file_keys,
                 selection_vector,
                 is_log_batch,
             ),
-            total_actions: 0,
+            total_file_actions: 0,
             total_add_actions: 0,
             minimum_file_retention_timestamp,
+
+            seen_protocol: false,
+            seen_metadata: false,
+            seen_txns,
+            total_non_file_actions: 0,
         }
     }
 
@@ -541,8 +564,8 @@ impl CheckpointFileActionsVisitor<'_> {
         i: usize,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<bool> {
-        let Some((file_key, is_add)) = self.deduplicator.extract_file_action(
-            i, getters, 0,     // add_path_index
+        let Some((file_key, is_add)) = self.file_deduplicator.extract_file_action(
+            i, &getters, 0,     // add_path_index
             4,     // remove_path_index
             1,     // add_dv_start_index
             6,     // remove_dv_start_index
@@ -551,11 +574,12 @@ impl CheckpointFileActionsVisitor<'_> {
         else {
             return Ok(false);
         };
-        if self.deduplicator.check_and_record_seen(file_key) {
+
+        if self.file_deduplicator.check_and_record_seen(file_key) {
             return Ok(false);
         }
 
-        // Ignore expired tombstones.
+        // Ignore expired tombstones. The getter at the fifth index is the remove action's deletionTimestamp.
         if !is_add && self.is_expired_tombstone(i, getters[5])? {
             return Ok(false);
         }
@@ -564,39 +588,98 @@ impl CheckpointFileActionsVisitor<'_> {
             self.total_add_actions += 1;
         }
 
+        self.total_file_actions += 1;
         Ok(true)
+    }
+
+    /// Returns true if the row contains a protocol action, and we haven't seen one yet.
+    fn is_valid_protocol_action<'a>(
+        &mut self,
+        i: usize,
+        getter: &'a dyn GetData<'a>,
+    ) -> DeltaResult<bool> {
+        if getter.get_int(i, "protocol.minReaderVersion")?.is_some() && !self.seen_protocol {
+            self.seen_protocol = true;
+            self.total_non_file_actions += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Returns true if the row contains a metadata action, and we haven't seen one yet.
+    fn is_valid_metadata_action<'a>(
+        &mut self,
+        i: usize,
+        getter: &'a dyn GetData<'a>,
+    ) -> DeltaResult<bool> {
+        if getter.get_str(i, "metaData.id")?.is_some() && !self.seen_metadata {
+            self.seen_metadata = true;
+            self.total_non_file_actions += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Returns true if the row contains a txn action with an appId that we haven't seen yet.
+    fn is_valid_txn_action<'a>(
+        &mut self,
+        i: usize,
+        getter: &'a dyn GetData<'a>,
+    ) -> DeltaResult<bool> {
+        let app_id = match getter.get_str(i, "txn.appId")? {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+
+        // Attempting to insert the app_id into the set. If it's already present, the insert will
+        // return false, indicating that we've already seen this app_id.
+        if self.seen_txns.insert(app_id.to_string()) {
+            self.total_non_file_actions += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
-impl RowVisitor for CheckpointFileActionsVisitor<'_> {
+impl RowVisitor for CheckpointVisitor<'_> {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         // The data columns visited must be in the following order:
         // 1. ADD
         // 2. REMOVE
-        static CHECKPOINT_FILE_ACTION_COLUMNS: LazyLock<ColumnNamesAndTypes> =
-            LazyLock::new(|| {
-                const STRING: DataType = DataType::STRING;
-                const INTEGER: DataType = DataType::INTEGER;
-                let types_and_names = vec![
-                    (STRING, column_name!("add.path")),
-                    (STRING, column_name!("add.deletionVector.storageType")),
-                    (STRING, column_name!("add.deletionVector.pathOrInlineDv")),
-                    (INTEGER, column_name!("add.deletionVector.offset")),
-                    (STRING, column_name!("remove.path")),
-                    (DataType::LONG, column_name!("remove.deletionTimestamp")),
-                    (STRING, column_name!("remove.deletionVector.storageType")),
-                    (STRING, column_name!("remove.deletionVector.pathOrInlineDv")),
-                    (INTEGER, column_name!("remove.deletionVector.offset")),
-                ];
-                let (types, names) = types_and_names.into_iter().unzip();
-                (names, types).into()
-            });
-        CHECKPOINT_FILE_ACTION_COLUMNS.as_ref()
+        // 3. METADATA
+        // 4. PROTOCOL
+        // 5. TXN
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+            const STRING: DataType = DataType::STRING;
+            const INTEGER: DataType = DataType::INTEGER;
+            let types_and_names = vec![
+                // File action columns
+                (STRING, column_name!("add.path")),
+                (STRING, column_name!("add.deletionVector.storageType")),
+                (STRING, column_name!("add.deletionVector.pathOrInlineDv")),
+                (INTEGER, column_name!("add.deletionVector.offset")),
+                (STRING, column_name!("remove.path")),
+                (DataType::LONG, column_name!("remove.deletionTimestamp")),
+                (STRING, column_name!("remove.deletionVector.storageType")),
+                (STRING, column_name!("remove.deletionVector.pathOrInlineDv")),
+                (INTEGER, column_name!("remove.deletionVector.offset")),
+                // Non-file action columns
+                (STRING, column_name!("metaData.id")),
+                (INTEGER, column_name!("protocol.minReaderVersion")),
+                (STRING, column_name!("txn.appId")),
+            ];
+            let (types, names) = types_and_names.into_iter().unzip();
+            (names, types).into()
+        });
+        NAMES_AND_TYPES.as_ref()
     }
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         require!(
-            getters.len() == 9,
+            getters.len() == 12,
             Error::InternalError(format!(
                 "Wrong number of visitor getters: {}",
                 getters.len()
@@ -604,11 +687,17 @@ impl RowVisitor for CheckpointFileActionsVisitor<'_> {
         );
 
         for i in 0..row_count {
-            let should_select = self.is_valid_file_action(i, getters)?;
+            // Check for non-file actions (metadata, protocol, txn)
+            let is_non_file_action = self.is_valid_metadata_action(i, getters[9])?
+                || self.is_valid_protocol_action(i, getters[10])?
+                || self.is_valid_txn_action(i, getters[11])?;
 
-            if should_select {
-                self.deduplicator.selection_vector[i] = true;
-                self.total_actions += 1;
+            // Check for file actions (add, remove)
+            let is_file_action = self.is_valid_file_action(i, getters)?;
+
+            // Mark the row for selection if it's either a valid non-file or file action
+            if is_non_file_action || is_file_action {
+                self.file_deduplicator.selection_vector_mut()[i] = true;
             }
         }
         Ok(())
@@ -1140,100 +1229,105 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_checkpoint_file_action_visitor() -> DeltaResult<()> {
+    fn test_checkpoint_visitor() -> DeltaResult<()> {
         let data = action_batch();
-        let deduplicator = FileActionDeduplicator {
-            seen_file_keys: &mut HashSet::new(),
-            selection_vector: vec![false; 8],
-            is_log_batch: true,
-        };
-        let mut visitor = CheckpointFileActionsVisitor {
-            deduplicator,
-            total_actions: 0,
-            total_add_actions: 0,
-            minimum_file_retention_timestamp: 0, // No tombstones are expired
-        };
+        let mut seen_file_keys = HashSet::new();
+        let mut seen_txns = HashSet::new();
+        let mut visitor = CheckpointVisitor::new(
+            &mut seen_file_keys,
+            &mut seen_txns,
+            vec![false; 8],
+            true,
+            0, // minimum_file_retention_timestamp (no expired tombstones)
+        );
 
         visitor.visit_rows_of(data.as_ref())?;
 
-        let expected = vec![true, true, false, false, false, false, false, false];
-        assert_eq!(visitor.deduplicator.seen_file_keys.len(), 2);
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
-        assert_eq!(visitor.total_actions, 2);
+        // Combined results from both file and non-file actions
+        // Row 0 is an add action
+        // Row 1 is a remove action
+        // Row 3 is a protocol action
+        // Row 4 is a metadata action
+        // Row 7 is a txn action
+        let expected = vec![true, true, false, true, true, false, false, true];
+
+        // Verify file action results
+        assert_eq!(visitor.total_file_actions, 2);
         assert_eq!(visitor.total_add_actions, 1);
+
+        // Verify non-file action results
+        assert!(visitor.seen_protocol);
+        assert!(visitor.seen_metadata);
+        assert_eq!(visitor.seen_txns.len(), 1);
+        assert_eq!(visitor.total_non_file_actions, 3);
+
+        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
         Ok(())
     }
 
     #[test]
-    fn test_checkpoint_file_action_visitor_boundary_cases_for_tombstone_expiration(
-    ) -> DeltaResult<()> {
+    fn test_checkpoint_visitor_boundary_cases_for_tombstone_expiration() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
-        r#"{"remove":{"path":"exactly_at_threshold","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#,
-        r#"{"remove":{"path":"one_below_threshold","deletionTimestamp":99,"dataChange":true,"partitionValues":{}}}"#,
-        r#"{"remove":{"path":"one_above_threshold","deletionTimestamp":101,"dataChange":true,"partitionValues":{}}}"#,
-        r#"{"remove":{"path":"missing_timestamp","dataChange":true,"partitionValues":{}}}"#, // Missing timestamp defaults to 0
+            r#"{"remove":{"path":"exactly_at_threshold","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#,
+            r#"{"remove":{"path":"one_below_threshold","deletionTimestamp":99,"dataChange":true,"partitionValues":{}}}"#,
+            r#"{"remove":{"path":"one_above_threshold","deletionTimestamp":101,"dataChange":true,"partitionValues":{}}}"#,
+            // Missing timestamp defaults to 0
+            r#"{"remove":{"path":"missing_timestamp","dataChange":true,"partitionValues":{}}}"#, 
         ]
         .into();
         let batch = parse_json_batch(json_strings);
 
-        let deduplicator = FileActionDeduplicator {
-            seen_file_keys: &mut HashSet::new(),
-            selection_vector: vec![false; 4],
-            is_log_batch: true,
-        };
-        let mut visitor = CheckpointFileActionsVisitor {
-            deduplicator,
-            total_actions: 0,
-            total_add_actions: 0,
-            minimum_file_retention_timestamp: 100, // Threshold set to 100
-        };
+        let mut seen_file_keys = HashSet::new();
+        let mut seen_txns = HashSet::new();
+        let mut visitor = CheckpointVisitor::new(
+            &mut seen_file_keys,
+            &mut seen_txns,
+            vec![false; 4],
+            true,
+            100, // minimum_file_retention_timestamp (threshold set to 100)
+        );
 
         visitor.visit_rows_of(batch.as_ref())?;
 
-        let expected = vec![false, false, true, false]; // Only "one_above_threshold" should be kept
-        assert_eq!(visitor.deduplicator.seen_file_keys.len(), 4); // All are recorded as seen even if expired
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
-        assert_eq!(visitor.total_actions, 1);
+        // Only "one_above_threshold" should be kept
+        let expected = vec![false, false, true, false];
+        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.total_file_actions, 1);
         assert_eq!(visitor.total_add_actions, 0);
+        assert_eq!(visitor.total_non_file_actions, 0);
         Ok(())
     }
 
     #[test]
-    fn test_checkpoint_file_action_visitor_duplicate_file_actions_in_log_batch() -> DeltaResult<()>
-    {
+    fn test_checkpoint_visitor_conflicting_file_actions_in_log_batch() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             r#"{"add":{"path":"file1","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#,
-            r#"{"remove":{"path":"file1","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#, // Duplicate path
-            ]
+             // Duplicate path
+            r#"{"remove":{"path":"file1","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#,
+        ]
         .into();
         let batch = parse_json_batch(json_strings);
 
-        let deduplicator = FileActionDeduplicator {
-            seen_file_keys: &mut HashSet::new(),
-            selection_vector: vec![false; 2],
-            is_log_batch: true,
-        };
-        let mut visitor = CheckpointFileActionsVisitor {
-            deduplicator,
-            total_actions: 0,
-            total_add_actions: 0,
-            minimum_file_retention_timestamp: 0,
-        };
+        let mut seen_file_keys = HashSet::new();
+        let mut seen_txns = HashSet::new();
+        let mut visitor =
+            CheckpointVisitor::new(&mut seen_file_keys, &mut seen_txns, vec![false; 2], true, 0);
 
         visitor.visit_rows_of(batch.as_ref())?;
 
         // First one should be included, second one skipped as a duplicate
         let expected = vec![true, false];
-        assert_eq!(visitor.deduplicator.seen_file_keys.len(), 1);
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
-        assert_eq!(visitor.total_actions, 1);
+        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.total_file_actions, 1);
         assert_eq!(visitor.total_add_actions, 1);
+        assert_eq!(visitor.total_non_file_actions, 0);
         Ok(())
     }
 
     #[test]
-    fn test_checkpoint_file_action_visitor_duplicate_file_actions_in_checkpoint_batch(
-    ) -> DeltaResult<()> {
+    fn test_checkpoint_visitor_duplicate_file_actions_in_checkpoint_batch() -> DeltaResult<()> {
+        // Note: this is NOT a valid checkpoint batch since it contains duplicate file actions!
+        // However, we should still be able to parse it without errors, and the duplicates should be included.
         let json_strings: StringArray = vec![
             r#"{"add":{"path":"file1","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#,
             // Duplicate path
@@ -1242,31 +1336,29 @@ mod tests {
         .into();
         let batch = parse_json_batch(json_strings);
 
-        let deduplicator = FileActionDeduplicator {
-            seen_file_keys: &mut HashSet::new(),
-            selection_vector: vec![false; 2],
-            is_log_batch: false,
-        };
-        let mut visitor = CheckpointFileActionsVisitor {
-            deduplicator,
-            total_actions: 0,
-            total_add_actions: 0,
-            minimum_file_retention_timestamp: 0,
-        };
+        let mut seen_file_keys = HashSet::new();
+        let mut seen_txns = HashSet::new();
+        let mut visitor = CheckpointVisitor::new(
+            &mut seen_file_keys,
+            &mut seen_txns,
+            vec![false; 2],
+            false, // is_log_batch = false (checkpoint batch)
+            0,
+        );
 
         visitor.visit_rows_of(batch.as_ref())?;
 
         // Both should be included since we don't track duplicates in checkpoint batches
         let expected = vec![true, true];
-        assert_eq!(visitor.deduplicator.seen_file_keys.len(), 0); // No tracking for checkpoint batches
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
-        assert_eq!(visitor.total_actions, 2);
+        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.total_file_actions, 2);
         assert_eq!(visitor.total_add_actions, 2);
+        assert_eq!(visitor.total_non_file_actions, 0);
         Ok(())
     }
 
     #[test]
-    fn test_checkpoint_file_action_visitor_with_deletion_vectors() -> DeltaResult<()> {
+    fn test_checkpoint_visitor_with_deletion_vectors() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"one","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
             // Same path but different DV
@@ -1276,52 +1368,52 @@ mod tests {
         ]
         .into();
         let batch = parse_json_batch(json_strings);
-        let deduplicator = FileActionDeduplicator {
-            seen_file_keys: &mut HashSet::new(),
-            selection_vector: vec![false; 3],
-            is_log_batch: true,
-        };
-        let mut visitor = CheckpointFileActionsVisitor {
-            deduplicator,
-            total_actions: 0,
-            total_add_actions: 0,
-            minimum_file_retention_timestamp: 0,
-        };
+
+        let mut seen_file_keys = HashSet::new();
+        let mut seen_txns = HashSet::new();
+        let mut visitor =
+            CheckpointVisitor::new(&mut seen_file_keys, &mut seen_txns, vec![false; 3], true, 0);
 
         visitor.visit_rows_of(batch.as_ref())?;
 
         let expected = vec![true, true, false]; // Third one is a duplicate
-        assert_eq!(visitor.deduplicator.seen_file_keys.len(), 2);
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
-        assert_eq!(visitor.total_actions, 2);
+        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.total_file_actions, 2);
         assert_eq!(visitor.total_add_actions, 2);
+        assert_eq!(visitor.total_non_file_actions, 0);
+
         Ok(())
     }
 
     #[test]
-    fn test_parse_checkpoint_non_file_actions_visitor() -> DeltaResult<()> {
-        let data = action_batch();
-        let mut visitor = CheckpointNonFileActionsVisitor {
-            seen_protocol: false,
-            seen_metadata: false,
-            seen_txns: &mut HashSet::new(),
-            selection_vector: vec![false; 8],
-            total_actions: 0,
-        };
+    fn test_checkpoint_visitor_non_file_actions() -> DeltaResult<()> {
+        let json_strings: StringArray = vec![
+            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
+            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
+        ].into();
+        let batch = parse_json_batch(json_strings);
 
-        visitor.visit_rows_of(data.as_ref())?;
+        let mut seen_file_keys = HashSet::new();
+        let mut seen_txns = HashSet::new();
+        let mut visitor =
+            CheckpointVisitor::new(&mut seen_file_keys, &mut seen_txns, vec![false; 3], true, 0);
 
-        let expected = vec![false, false, false, true, true, false, false, true];
-        assert_eq!(visitor.selection_vector, expected);
-        assert!(visitor.seen_metadata);
+        visitor.visit_rows_of(batch.as_ref())?;
+
+        let expected = vec![true, true, true];
+        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
         assert!(visitor.seen_protocol);
+        assert!(visitor.seen_metadata);
         assert_eq!(visitor.seen_txns.len(), 1);
-        assert_eq!(visitor.total_actions, 3);
+        assert_eq!(visitor.total_non_file_actions, 3);
+        assert_eq!(visitor.total_file_actions, 0);
+
         Ok(())
     }
 
     #[test]
-    fn test_checkpoint_non_file_actions_visitor_already_seen_actions() -> DeltaResult<()> {
+    fn test_checkpoint_visitor_already_seen_non_file_actions() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
             r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
@@ -1330,54 +1422,67 @@ mod tests {
         let batch = parse_json_batch(json_strings);
 
         // Pre-populate with txn app1
+        let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
         seen_txns.insert("app1".to_string());
 
-        let mut visitor = CheckpointNonFileActionsVisitor {
-            seen_protocol: true, // Already seen
-            seen_metadata: true, // Already seen
-            seen_txns: &mut seen_txns,
-            selection_vector: vec![false; 3],
-            total_actions: 0,
-        };
+        let mut visitor = CheckpointVisitor::new(
+            &mut seen_file_keys,
+            &mut seen_txns, // Pre-populated transaction
+            vec![false; 3],
+            true,
+            0,
+        );
+
+        // Mark these as already seen
+        visitor.seen_protocol = true;
+        visitor.seen_metadata = true;
 
         visitor.visit_rows_of(batch.as_ref())?;
 
         // All actions should be skipped as they have already been seen
-        let expected = vec![false; 3];
-        assert_eq!(visitor.selection_vector, expected);
-        assert_eq!(visitor.seen_txns.len(), 1); // Still only one transaction
-        assert_eq!(visitor.total_actions, 0);
+        let expected = vec![false, false, false];
+        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.total_non_file_actions, 0);
+        assert_eq!(visitor.total_file_actions, 0);
+
         Ok(())
     }
 
     #[test]
-    fn test_checkpoint_non_file_actions_visitor_duplicate_non_file_actions() -> DeltaResult<()> {
+    fn test_checkpoint_visitor_duplicate_non_file_actions() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
-            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
-            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
-            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#, // Duplicate txn
+            r#"{"txn":{"appId":"app2","version":1,"lastUpdated":123456789}}"#, // Different app ID
+            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7}}"#,
+            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7}}"#, // Duplicate protocol
             r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
-            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
+            // Duplicate metadata
+            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#, 
         ]
         .into();
         let batch = parse_json_batch(json_strings);
 
-        let mut visitor = CheckpointNonFileActionsVisitor {
-            seen_protocol: false,
-            seen_metadata: false,
-            seen_txns: &mut HashSet::new(), // Empty set
-            selection_vector: vec![false; 6],
-            total_actions: 0,
-        };
+        let mut seen_file_keys = HashSet::new();
+        let mut seen_txns = HashSet::new();
+        let mut visitor = CheckpointVisitor::new(
+            &mut seen_file_keys,
+            &mut seen_txns,
+            vec![false; 7],
+            true, // is_log_batch
+            0,    // minimum_file_retention_timestamp
+        );
 
         visitor.visit_rows_of(batch.as_ref())?;
 
-        let expected = vec![true, false, true, false, true, false];
-        assert_eq!(visitor.selection_vector, expected);
-        assert_eq!(visitor.seen_txns.len(), 1);
-        assert_eq!(visitor.total_actions, 3);
+        // First occurrence of each type should be included
+        let expected = vec![true, false, true, true, false, true, false];
+        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.seen_txns.len(), 2); // Two different app IDs
+        assert_eq!(visitor.total_non_file_actions, 4); // 2 txns + 1 protocol + 1 metadata
+        assert_eq!(visitor.total_file_actions, 0);
+
         Ok(())
     }
 }
