@@ -739,7 +739,7 @@ impl FileActionExtractConfig {
 
 /// Core implementation for deduplicating file actions in Delta log replay
 /// This struct extracts the common functionality from the CheckpointVisitor
-/// and the ScanDataVisitor.
+/// and the AddRemoveDedupVisitor.
 pub(crate) struct FileActionDeduplicator<'seen> {
     /// A set of (data file path, dv_unique_id) pairs that have been seen thus
     /// far in the log for deduplication
@@ -879,113 +879,6 @@ impl<'seen> FileActionDeduplicator<'seen> {
     /// Returns whether we are currently processing a log batch.
     pub(crate) fn is_log_batch(&self) -> bool {
         self.is_log_batch
-    }
-}
-
-/// A visitor that selects non-file actions for a checkpoint file. Since log replay visits actions
-/// in newest-first order, we only keep the first occurrence of:
-/// - a protocol action,
-/// - a metadata action,
-/// - a transaction (txn) action for a given app ID.
-///
-/// Any subsequent (older) actions of the same type are ignored. This visitor tracks which actions
-/// have been seen and includes only the first occurrence of each in the selection vector.
-#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-pub(crate) struct CheckpointNonFileActionsVisitor<'seen> {
-    // Non-file actions state
-    pub(crate) seen_protocol: bool,
-    pub(crate) seen_metadata: bool,
-    pub(crate) seen_txns: &'seen mut HashSet<String>,
-    pub(crate) selection_vector: Vec<bool>,
-    pub(crate) total_actions: usize,
-}
-
-#[allow(unused)] // TODO: Remove flag once used for checkpoint writing
-impl CheckpointNonFileActionsVisitor<'_> {
-    /// Returns true if the row contains a protocol action, and we haven’t seen one yet.
-    fn is_valid_protocol_action<'a>(
-        &mut self,
-        i: usize,
-        getter: &'a dyn GetData<'a>,
-    ) -> DeltaResult<bool> {
-        if getter.get_int(i, "protocol.minReaderVersion")?.is_some() && !self.seen_protocol {
-            self.seen_protocol = true;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Returns true if the row contains a metadata action, and we haven’t seen one yet.
-    fn is_valid_metadata_action<'a>(
-        &mut self,
-        i: usize,
-        getter: &'a dyn GetData<'a>,
-    ) -> DeltaResult<bool> {
-        if getter.get_str(i, "metaData.id")?.is_some() && !self.seen_metadata {
-            self.seen_metadata = true;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Returns true if the row contains a txn action with an appId that we haven’t seen yet.
-    fn is_valid_txn_action<'a>(
-        &mut self,
-        i: usize,
-        getter: &'a dyn GetData<'a>,
-    ) -> DeltaResult<bool> {
-        let app_id = match getter.get_str(i, "txn.appId")? {
-            Some(id) => id,
-            None => return Ok(false),
-        };
-
-        Ok(self.seen_txns.insert(app_id.to_string()))
-    }
-}
-
-impl RowVisitor for CheckpointNonFileActionsVisitor<'_> {
-    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-        // The data columns visited must be in the following order:
-        // 1. METADATA
-        // 2. PROTOCOL
-        // 3. TXN
-        static CHECKPOINT_NON_FILE_ACTION_COLUMNS: LazyLock<ColumnNamesAndTypes> =
-            LazyLock::new(|| {
-                const STRING: DataType = DataType::STRING;
-                const INTEGER: DataType = DataType::INTEGER;
-                let types_and_names = vec![
-                    (STRING, column_name!("metaData.id")),
-                    (INTEGER, column_name!("protocol.minReaderVersion")),
-                    (STRING, column_name!("txn.appId")),
-                ];
-                let (types, names) = types_and_names.into_iter().unzip();
-                (names, types).into()
-            });
-        CHECKPOINT_NON_FILE_ACTION_COLUMNS.as_ref()
-    }
-
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        require!(
-            getters.len() == 3,
-            Error::InternalError(format!(
-                "Wrong number of visitor getters: {}",
-                getters.len()
-            ))
-        );
-
-        for i in 0..row_count {
-            let should_select = self.is_valid_metadata_action(i, getters[0])?
-                || self.is_valid_protocol_action(i, getters[1])?
-                || self.is_valid_txn_action(i, getters[2])?;
-
-            if should_select {
-                self.selection_vector[i] = true;
-                self.total_actions += 1;
-            }
-        }
-        Ok(())
     }
 }
 
