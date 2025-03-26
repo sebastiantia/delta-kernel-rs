@@ -4,8 +4,22 @@ use std::sync::Arc;
 
 use crate::actions::visitors::CheckpointVisitor;
 use crate::engine_data::RowVisitor;
-use crate::log_replay::{FileActionKey, LogReplayProcessor};
+use crate::log_replay::{
+    apply_processor_to_iterator, FileActionKey, HasSelectionVector, LogReplayProcessor,
+};
 use crate::{DeltaResult, EngineData};
+
+pub struct CheckpointData {
+    #[allow(unused)]
+    data: Box<dyn EngineData>,
+    selection_vector: Vec<bool>,
+}
+
+impl HasSelectionVector for CheckpointData {
+    fn has_selected_rows(&self) -> bool {
+        self.selection_vector.contains(&true)
+    }
+}
 
 /// `CheckpointLogReplayProcessor` is responsible for filtering actions during log
 /// replay to include only those that should be included in a V1 checkpoint.
@@ -36,7 +50,7 @@ struct CheckpointLogReplayProcessor {
 
 impl LogReplayProcessor for CheckpointLogReplayProcessor {
     // Define the processing result type as a tuple of the data and selection vector
-    type ProcessingResult = (Box<dyn EngineData>, Vec<bool>);
+    type ProcessingResult = CheckpointData;
 
     /// This function processes batches of actions in reverse chronological order
     /// (from most recent to least recent) and performs the necessary filtering
@@ -90,7 +104,10 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
         self.seen_protocol = visitor.seen_protocol;
         self.seen_metadata = visitor.seen_metadata;
 
-        Ok((batch, visitor.deduplicator.selection_vector()))
+        Ok(CheckpointData {
+            data: batch,
+            selection_vector: visitor.deduplicator.selection_vector(),
+        })
     }
 
     // Get a reference to the set of seen file keys
@@ -132,20 +149,14 @@ pub(crate) fn checkpoint_actions_iter(
     total_actions_counter: Arc<AtomicUsize>,
     total_add_actions_counter: Arc<AtomicUsize>,
     minimum_file_retention_timestamp: i64,
-) -> impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, Vec<bool>)>> + Send + 'static {
+) -> impl Iterator<Item = DeltaResult<CheckpointData>> + Send + 'static {
     let mut log_scanner = CheckpointLogReplayProcessor::new(
         total_actions_counter,
         total_add_actions_counter,
         minimum_file_retention_timestamp,
     );
 
-    action_iter
-        .map(move |action_res| {
-            let (batch, is_log_batch) = action_res?;
-            log_scanner.process_batch(batch, is_log_batch)
-        })
-        // Only yield batches that have at least one selected row
-        .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true)))
+    apply_processor_to_iterator(log_scanner, action_iter)
 }
 
 #[cfg(test)]
@@ -212,12 +223,18 @@ mod tests {
         assert_eq!(results.len(), 2);
 
         // First batch should have all rows selected
-        let (_, selection_vector1) = &results[0];
-        assert_eq!(selection_vector1, &vec![true, true, true, true]);
+        let checkpoint_data = &results[0];
+        assert_eq!(
+            checkpoint_data.selection_vector,
+            vec![true, true, true, true]
+        );
 
         // Second batch should have only new file and transaction selected
-        let (_, selection_vector2) = &results[1];
-        assert_eq!(selection_vector2, &vec![false, false, true, false, true]);
+        let checkpoint_data = &results[1];
+        assert_eq!(
+            checkpoint_data.selection_vector,
+            vec![false, false, true, false, true]
+        );
 
         // Verify counters
         // 6 total actions (4 from batch1 + 2 from batch2 + 0 from batch3)

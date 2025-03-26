@@ -10,7 +10,7 @@ use crate::actions::get_log_add_schema;
 use crate::actions::visitors::{FileActionDeduplicator, FileActionExtractConfig};
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
-use crate::log_replay::{FileActionKey, LogReplayProcessor};
+use crate::log_replay::{apply_processor_to_iterator, FileActionKey, LogReplayProcessor};
 use crate::predicates::{DefaultPredicateEvaluator, PredicateEvaluator as _};
 use crate::scan::{Scalar, TransformExpr};
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
@@ -350,15 +350,10 @@ pub(crate) fn scan_action_iter(
     transform: Option<Arc<Transform>>,
     physical_predicate: Option<(ExpressionRef, SchemaRef)>,
 ) -> impl Iterator<Item = DeltaResult<ScanData>> {
-    let mut log_scanner =
+    let log_scanner =
         ScanLogReplayProcessor::new(engine, physical_predicate, logical_schema, transform);
 
-    action_iter
-        .map(move |action_res| {
-            let (batch, is_log_batch) = action_res?;
-            log_scanner.process_batch(batch, is_log_batch)
-        })
-        .filter(|res| res.as_ref().map_or(true, |(_, sv, _)| sv.contains(&true)))
+    apply_processor_to_iterator(log_scanner, action_iter)
 }
 
 #[cfg(test)]
