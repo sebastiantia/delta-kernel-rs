@@ -22,10 +22,9 @@ impl FileActionKey {
 
 /// Maintains state and provides functionality for deduplicating file actions during log replay.
 ///
-/// This struct is embedded in visitors AddRemoveDedupVisitor and CheckpointVisitor to track
-/// which files have been seen across multiple log batches. Since logs are processed
-/// newest-to-oldest, this deduplicator ensures that each unique file (identified by path
-///  and deletion vector ID) is processed only once.
+/// This struct is embedded in visitors to track which files have been seen across multiple
+/// log batches. Since logs are processed newest-to-oldest, this deduplicator ensures that each
+/// unique file (identified by path and deletion vector ID) is processed only once.
 pub(crate) struct FileActionDeduplicator<'seen> {
     /// A set of (data file path, dv_unique_id) pairs that have been seen thus
     /// far in the log for deduplication. This is a mutable reference to the set
