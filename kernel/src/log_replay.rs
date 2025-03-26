@@ -25,7 +25,8 @@ impl FileActionKey {
 /// and the AddRemoveDedupVisitor.
 pub(crate) struct FileActionDeduplicator<'seen> {
     /// A set of (data file path, dv_unique_id) pairs that have been seen thus
-    /// far in the log for deduplication
+    /// far in the log for deduplication. This is a mutable reference to the set
+    /// of seen file keys that persists across multiple log batches.
     seen_file_keys: &'seen mut HashSet<FileActionKey>,
     /// Selection vector to track which rows should be included
     selection_vector: Vec<bool>,
