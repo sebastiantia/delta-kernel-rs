@@ -7,7 +7,7 @@ use itertools::Itertools;
 use super::data_skipping::DataSkippingFilter;
 use super::{ScanData, Transform};
 use crate::actions::get_log_add_schema;
-use crate::actions::visitors::FileActionDeduplicator;
+use crate::actions::visitors::{FileActionDeduplicator, FileActionExtractConfig};
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
 use crate::predicates::{DefaultPredicateEvaluator, PredicateEvaluator as _};
@@ -150,11 +150,7 @@ impl AddRemoveDedupVisitor<'_> {
         let Some((file_key, is_add)) = self.deduplicator.extract_file_action(
             i,
             getters,
-            0,                                 // add_path_index
-            5,                                 // remove_path_index
-            2,                                 // add_dv_start_index
-            6,                                 // remove_dv_start_index
-            !self.deduplicator.is_log_batch(), // skip_removes if it's a log batch
+            FileActionExtractConfig::new(0, 5, 2, 6, !self.deduplicator.is_log_batch()),
         )?
         else {
             return Ok(false);
