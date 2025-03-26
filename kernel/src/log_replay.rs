@@ -1,9 +1,10 @@
-use crate::{
-    actions::deletion_vector::DeletionVectorDescriptor,
-    engine_data::{GetData, TypedGetData},
-    DeltaResult,
-};
+//! This module provides structures and functionality to faciliate the log replay process.
 use std::collections::HashSet;
+
+use crate::actions::deletion_vector::DeletionVectorDescriptor;
+use crate::engine_data::{GetData, TypedGetData};
+use crate::DeltaResult;
+
 use tracing::debug;
 
 /// The subset of file action fields that uniquely identifies it in the log, used for deduplication
@@ -24,7 +25,9 @@ impl FileActionKey {
 ///
 /// This struct is embedded in visitors to track which files have been seen across multiple
 /// log batches. Since logs are processed newest-to-oldest, this deduplicator ensures that each
-/// unique file (identified by path and deletion vector ID) is processed only once.
+/// unique file (identified by path and deletion vector ID) is processed only once. Performing
+/// deduplication at the visitor level avoids having to load all actions into memory at once,
+/// significantly reducing memory usage for large Delta tables with extensive history.
 pub(crate) struct FileActionDeduplicator<'seen> {
     /// A set of (data file path, dv_unique_id) pairs that have been seen thus
     /// far in the log for deduplication. This is a mutable reference to the set
