@@ -7,9 +7,10 @@ use itertools::Itertools;
 use super::data_skipping::DataSkippingFilter;
 use super::{ScanData, Transform};
 use crate::actions::get_log_add_schema;
+use crate::actions::visitors::{FileActionDeduplicator, FileActionExtractConfig};
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
-use crate::log_replay::{FileActionKey, FileActionVisitor, LogReplayProcessor};
+use crate::log_replay::{FileActionKey, LogReplayProcessor};
 use crate::predicates::{DefaultPredicateEvaluator, PredicateEvaluator as _};
 use crate::scan::{Scalar, TransformExpr};
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
@@ -33,46 +34,31 @@ struct ScanLogReplayProcessor {
 /// pair, we should ignore all subsequent (older) actions for that same (path, dvId) pair. If the
 /// first action for a given file is a remove, then that file does not show up in the result at all.
 struct AddRemoveDedupVisitor<'seen> {
-    seen_file_keys: &'seen mut HashSet<FileActionKey>,
-    selection_vector: Vec<bool>,
+    deduplicator: FileActionDeduplicator<'seen>,
     logical_schema: SchemaRef,
     transform: Option<Arc<Transform>>,
     partition_filter: Option<ExpressionRef>,
     row_transform_exprs: Vec<Option<ExpressionRef>>,
-    is_log_batch: bool,
-}
-
-impl FileActionVisitor for AddRemoveDedupVisitor<'_> {
-    fn seen_file_keys(&mut self) -> &mut HashSet<FileActionKey> {
-        self.seen_file_keys
-    }
-
-    fn add_path_index(&self) -> usize {
-        0
-    }
-
-    fn remove_path_index(&self) -> Option<usize> {
-        if self.is_log_batch {
-            Some(5)
-        } else {
-            None // No remove action getters when not a log batch
-        }
-    }
-
-    fn add_dv_start_index(&self) -> usize {
-        2
-    }
-
-    fn remove_dv_start_index(&self) -> Option<usize> {
-        if self.is_log_batch {
-            Some(6)
-        } else {
-            None // No remove action getters when not a log batch
-        }
-    }
 }
 
 impl AddRemoveDedupVisitor<'_> {
+    fn new(
+        seen: &mut HashSet<FileActionKey>,
+        selection_vector: Vec<bool>,
+        logical_schema: SchemaRef,
+        transform: Option<Arc<Transform>>,
+        partition_filter: Option<ExpressionRef>,
+        is_log_batch: bool,
+    ) -> AddRemoveDedupVisitor<'_> {
+        AddRemoveDedupVisitor {
+            deduplicator: FileActionDeduplicator::new(seen, selection_vector, is_log_batch),
+            logical_schema,
+            transform,
+            partition_filter,
+            row_transform_exprs: Vec::new(),
+        }
+    }
+
     fn parse_partition_value(
         &self,
         field_idx: usize,
@@ -150,9 +136,12 @@ impl AddRemoveDedupVisitor<'_> {
     /// True if this row contains an Add action that should survive log replay. Skip it if the row
     /// is not an Add action, or the file has already been seen previously.
     fn is_valid_add<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
-        // Retrieve the file action key and whether it is an add action
-        let Some((file_key, is_add)) = self.extract_file_action(i, getters)? else {
-            // Not a file action
+        let Some((file_key, is_add)) = self.deduplicator.extract_file_action(
+            i,
+            getters,
+            FileActionExtractConfig::new(0, 5, 2, 6, !self.deduplicator.is_log_batch()),
+        )?
+        else {
             return Ok(false);
         };
 
@@ -175,7 +164,7 @@ impl AddRemoveDedupVisitor<'_> {
         };
 
         // Check both adds and removes (skipping already-seen), but only transform and return adds
-        if self.check_and_record_seen(file_key, self.is_log_batch) || !is_add {
+        if self.deduplicator.check_and_record_seen(file_key) || !is_add {
             return Ok(false);
         }
         let transform = self
@@ -214,7 +203,7 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
             (names, types).into()
         });
         let (names, types) = NAMES_AND_TYPES.as_ref();
-        if self.is_log_batch {
+        if self.deduplicator.is_log_batch() {
             (names, types)
         } else {
             // All checkpoint actions are already reconciled and Remove actions in checkpoint files
@@ -224,7 +213,11 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
     }
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        let expected_getters = if self.is_log_batch { 9 } else { 5 };
+        let expected_getters = if self.deduplicator.is_log_batch() {
+            9
+        } else {
+            5
+        };
         require!(
             getters.len() == expected_getters,
             Error::InternalError(format!(
@@ -234,8 +227,8 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
         );
 
         for i in 0..row_count {
-            if self.selection_vector[i] {
-                self.selection_vector[i] = self.is_valid_add(i, getters)?;
+            if self.deduplicator.selection_vector_ref()[i] {
+                self.deduplicator.selection_vector_mut()[i] = self.is_valid_add(i, getters)?;
             }
         }
         Ok(())
@@ -302,20 +295,19 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
         let partition_filter = self.partition_filter.clone();
         let result = self.add_transform.evaluate(batch.as_ref())?;
 
-        let mut visitor = AddRemoveDedupVisitor {
-            seen_file_keys: &mut self.seen_file_keys(),
+        let mut visitor = AddRemoveDedupVisitor::new(
+            self.seen_file_keys(),
             selection_vector,
             logical_schema,
             transform,
             partition_filter,
-            row_transform_exprs: Vec::new(),
             is_log_batch,
-        };
+        );
 
         visitor.visit_rows_of(batch.as_ref())?;
 
         // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
-        let selection_vector = visitor.selection_vector;
+        let selection_vector = visitor.deduplicator.selection_vector();
         Ok((result, selection_vector, visitor.row_transform_exprs))
     }
 

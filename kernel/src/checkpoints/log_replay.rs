@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::actions::visitors::{CheckpointFileActionsVisitor, CheckpointNonFileActionsVisitor};
+use crate::actions::visitors::CheckpointVisitor;
 use crate::engine_data::RowVisitor;
 use crate::log_replay::{FileActionKey, LogReplayProcessor};
 use crate::{DeltaResult, EngineData};
@@ -57,49 +57,40 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
         is_log_batch: bool,
     ) -> DeltaResult<Self::ProcessingResult> {
         // Initialize selection vector with all rows un-selected
-        let mut selection_vector = vec![false; batch.len()];
+        let selection_vector = vec![false; batch.len()];
         assert_eq!(
             selection_vector.len(),
             batch.len(),
             "Initial selection vector length does not match actions length"
         );
 
-        // Create the non file actions visitor to process non file actions and update selection vector
-        let mut non_file_actions_visitor = CheckpointNonFileActionsVisitor {
-            seen_protocol: &mut self.seen_protocol,
-            seen_metadata: &mut self.seen_metadata,
-            seen_txns: &mut self.seen_txns,
-            selection_vector: &mut selection_vector,
-            total_actions: 0,
-        };
-
-        // Process actions and let visitor update selection vector
-        non_file_actions_visitor.visit_rows_of(batch.as_ref())?;
-
-        // Update shared counters with non-file action counts from this batch
-        self.total_actions
-            .fetch_add(non_file_actions_visitor.total_actions, Ordering::Relaxed);
-
-        // Create the file actions visitor to process file actions and update selection vector
-        let mut file_actions_visitor = CheckpointFileActionsVisitor {
-            seen_file_keys: &mut self.seen_file_keys,
+        // Create the checkpoint visitor to process actions and update selection vector
+        let mut visitor = CheckpointVisitor::new(
+            &mut self.seen_file_keys,
+            selection_vector,
             is_log_batch,
-            selection_vector: &mut selection_vector,
-            total_actions: 0,
-            total_add_actions: 0,
-            minimum_file_retention_timestamp: self.minimum_file_retention_timestamp,
-        };
+            self.minimum_file_retention_timestamp,
+            self.seen_protocol,
+            self.seen_metadata,
+            &mut self.seen_txns,
+        );
 
         // Process actions and let visitor update selection vector
-        file_actions_visitor.visit_rows_of(batch.as_ref())?;
+        visitor.visit_rows_of(batch.as_ref())?;
 
         // Update shared counters with file action counts from this batch
-        self.total_actions
-            .fetch_add(file_actions_visitor.total_actions, Ordering::Relaxed);
+        self.total_actions.fetch_add(
+            visitor.total_file_actions + visitor.total_non_file_actions,
+            Ordering::SeqCst,
+        );
         self.total_add_actions
-            .fetch_add(file_actions_visitor.total_add_actions, Ordering::Relaxed);
+            .fetch_add(visitor.total_add_actions, Ordering::SeqCst);
 
-        Ok((batch, selection_vector))
+        // Update protocol and metadata seen flags
+        self.seen_protocol = visitor.seen_protocol;
+        self.seen_metadata = visitor.seen_metadata;
+
+        Ok((batch, visitor.deduplicator.selection_vector()))
     }
 
     // Get a reference to the set of seen file keys
