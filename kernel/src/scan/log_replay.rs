@@ -7,7 +7,7 @@ use itertools::Itertools;
 use super::data_skipping::DataSkippingFilter;
 use super::{ScanData, Transform};
 use crate::actions::get_log_add_schema;
-use crate::actions::visitors::{FileActionDeduplicator, FileActionExtractConfig};
+use crate::actions::visitors::{FileActionDeduplicator, FileActionExtractConfig, FileActionKey};
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
 use crate::log_replay::{FileActionDeduplicator, FileActionKey};
