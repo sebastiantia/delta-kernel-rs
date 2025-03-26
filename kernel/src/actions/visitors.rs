@@ -1182,13 +1182,13 @@ mod tests {
     #[test]
     fn test_checkpoint_visitor_boundary_cases_for_tombstone_expiration() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
-        r#"{"remove":{"path":"exactly_at_threshold","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#,
-        r#"{"remove":{"path":"one_below_threshold","deletionTimestamp":99,"dataChange":true,"partitionValues":{}}}"#,
-        r#"{"remove":{"path":"one_above_threshold","deletionTimestamp":101,"dataChange":true,"partitionValues":{}}}"#,
-        // Missing timestamp defaults to 0
-        r#"{"remove":{"path":"missing_timestamp","dataChange":true,"partitionValues":{}}}"#, 
-    ]
-    .into();
+            r#"{"remove":{"path":"exactly_at_threshold","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#,
+            r#"{"remove":{"path":"one_below_threshold","deletionTimestamp":99,"dataChange":true,"partitionValues":{}}}"#,
+            r#"{"remove":{"path":"one_above_threshold","deletionTimestamp":101,"dataChange":true,"partitionValues":{}}}"#,
+            // Missing timestamp defaults to 0
+            r#"{"remove":{"path":"missing_timestamp","dataChange":true,"partitionValues":{}}}"#, 
+        ]
+        .into();
         let batch = parse_json_batch(json_strings);
 
         let mut seen_file_keys = HashSet::new();
@@ -1217,11 +1217,11 @@ mod tests {
     #[test]
     fn test_checkpoint_visitor_conflicting_file_actions_in_log_batch() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
-        r#"{"add":{"path":"file1","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#,
-         // Duplicate path
-        r#"{"remove":{"path":"file1","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#,
-    ]
-    .into();
+            r#"{"add":{"path":"file1","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#,
+            // Duplicate path
+            r#"{"remove":{"path":"file1","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#,
+        ]
+        .into();
         let batch = parse_json_batch(json_strings);
 
         let mut seen_file_keys = HashSet::new();
@@ -1252,11 +1252,11 @@ mod tests {
         // Note: this is NOT a valid checkpoint batch since it contains duplicate file actions!
         // However, we should still be able to parse it without errors, and the duplicates should be included.
         let json_strings: StringArray = vec![
-        r#"{"add":{"path":"file1","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#,
-        // Duplicate path
-        r#"{"add":{"path":"file1","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#, 
-    ]
-    .into();
+            r#"{"add":{"path":"file1","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#,
+            // Duplicate path
+            r#"{"add":{"path":"file1","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#, 
+        ]
+        .into();
         let batch = parse_json_batch(json_strings);
 
         let mut seen_file_keys = HashSet::new();
@@ -1285,13 +1285,13 @@ mod tests {
     #[test]
     fn test_checkpoint_visitor_with_deletion_vectors() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
-        r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"one","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
-        // Same path but different DV
-        r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"two","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#, 
-        // Duplicate of first entry
-        r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"one","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#, 
-    ]
-    .into();
+            r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"one","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
+            // Same path but different DV
+            r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"two","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#, 
+            // Duplicate of first entry
+            r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"one","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#, 
+        ]
+        .into();
         let batch = parse_json_batch(json_strings);
 
         let mut seen_file_keys = HashSet::new();
@@ -1320,10 +1320,10 @@ mod tests {
     #[test]
     fn test_checkpoint_visitor_non_file_actions() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
-        r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
-        r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
-        r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
-    ].into();
+            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
+            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
+        ].into();
         let batch = parse_json_batch(json_strings);
 
         let mut seen_file_keys = HashSet::new();
@@ -1354,10 +1354,10 @@ mod tests {
     #[test]
     fn test_checkpoint_visitor_already_seen_non_file_actions() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
-        r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
-        r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
-        r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
-    ].into();
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
+            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
+            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
+        ].into();
         let batch = parse_json_batch(json_strings);
 
         // Pre-populate with txn app1
@@ -1389,16 +1389,16 @@ mod tests {
     #[test]
     fn test_checkpoint_visitor_duplicate_non_file_actions() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
-        r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
-        r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#, // Duplicate txn
-        r#"{"txn":{"appId":"app2","version":1,"lastUpdated":123456789}}"#, // Different app ID
-        r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7}}"#,
-        r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7}}"#, // Duplicate protocol
-        r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
-        // Duplicate metadata
-        r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#, 
-    ]
-    .into();
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#, // Duplicate txn
+            r#"{"txn":{"appId":"app2","version":1,"lastUpdated":123456789}}"#, // Different app ID
+            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7}}"#,
+            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7}}"#, // Duplicate protocol
+            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#,
+            // Duplicate metadata
+            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1677811175819}}"#, 
+        ]
+        .into();
         let batch = parse_json_batch(json_strings);
 
         let mut seen_file_keys = HashSet::new();
