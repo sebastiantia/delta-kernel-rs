@@ -152,7 +152,7 @@ impl AddRemoveDedupVisitor<'_> {
         // not try to extract remove actions in that case.
         let Some((file_key, is_add)) =
             self.deduplicator
-                .extract_file_action(i, getters, self.deduplicator.is_log_batch())?
+                .extract_file_action(i, getters, !self.deduplicator.is_log_batch())?
         else {
             return Ok(false);
         };
