@@ -7,7 +7,7 @@ use itertools::Itertools;
 use super::data_skipping::DataSkippingFilter;
 use super::{ScanData, Transform};
 use crate::actions::get_log_add_schema;
-use crate::actions::visitors::{FileActionDeduplicator, FileActionExtractConfig};
+use crate::actions::visitors::{FileActionDeduplicator, FileActionExtractConfig, FileActionKey};
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
 use crate::predicates::{DefaultPredicateEvaluator, PredicateEvaluator as _};
@@ -15,20 +15,6 @@ use crate::scan::{Scalar, TransformExpr};
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
 use crate::utils::require;
 use crate::{DeltaResult, Engine, EngineData, Error, ExpressionEvaluator};
-
-/// The subset of file action fields that uniquely identifies it in the log, used for deduplication
-/// of adds and removes during log replay.
-#[derive(Debug, Hash, Eq, PartialEq)]
-pub(crate) struct FileActionKey {
-    pub(crate) path: String,
-    pub(crate) dv_unique_id: Option<String>,
-}
-impl FileActionKey {
-    pub(crate) fn new(path: impl Into<String>, dv_unique_id: Option<String>) -> Self {
-        let path = path.into();
-        Self { path, dv_unique_id }
-    }
-}
 
 struct LogReplayScanner {
     partition_filter: Option<ExpressionRef>,
