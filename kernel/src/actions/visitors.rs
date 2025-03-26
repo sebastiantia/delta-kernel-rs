@@ -503,7 +503,7 @@ impl RowVisitor for SidecarVisitor {
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct CheckpointVisitor<'seen> {
     // File actions deduplication state
-    file_deduplicator: FileActionDeduplicator<'seen>,
+    deduplicator: FileActionDeduplicator<'seen>,
     total_file_actions: usize,
     total_add_actions: usize,
     minimum_file_retention_timestamp: i64,
@@ -526,7 +526,7 @@ impl CheckpointVisitor<'_> {
         minimum_file_retention_timestamp: i64,
     ) -> CheckpointVisitor<'seen> {
         CheckpointVisitor {
-            file_deduplicator: FileActionDeduplicator::new(
+            deduplicator: FileActionDeduplicator::new(
                 seen_file_keys,
                 selection_vector,
                 is_log_batch,
@@ -564,18 +564,18 @@ impl CheckpointVisitor<'_> {
         i: usize,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<bool> {
-        let Some((file_key, is_add)) = self.file_deduplicator.extract_file_action(
-            i, &getters, 0,     // add_path_index
-            4,     // remove_path_index
-            1,     // add_dv_start_index
-            6,     // remove_dv_start_index
-            false, // Never skip remove actions (even if we're processing a log batch)
+        // Extract file action key and determine if it's an add operation
+        let Some((file_key, is_add)) = self.deduplicator.extract_file_action(
+            i,
+            getters,
+            // Do not skip remove actions (even if we're processing a log batch)
+            FileActionExtractConfig::new(0, 4, 1, 6, false),
         )?
         else {
             return Ok(false);
         };
 
-        if self.file_deduplicator.check_and_record_seen(file_key) {
+        if self.deduplicator.check_and_record_seen(file_key) {
             return Ok(false);
         }
 
@@ -697,10 +697,43 @@ impl RowVisitor for CheckpointVisitor<'_> {
 
             // Mark the row for selection if it's either a valid non-file or file action
             if is_non_file_action || is_file_action {
-                self.file_deduplicator.selection_vector_mut()[i] = true;
+                self.deduplicator.selection_vector_mut()[i] = true;
             }
         }
         Ok(())
+    }
+}
+
+/// This struct contains indices and configuration options needed to
+/// extract file actions from action batches in the Delta log.
+pub(crate) struct FileActionExtractConfig {
+    /// Index of the getter containing the add.path column
+    pub add_path_index: usize,
+    /// Index of the getter containing the remove.path column
+    pub remove_path_index: usize,
+    /// Starting index for add action deletion vector columns
+    pub add_dv_start_index: usize,
+    /// Starting index for remove action deletion vector columns
+    pub remove_dv_start_index: usize,
+    /// Whether to skip remove actions when extracting file actions
+    pub skip_removes: bool,
+}
+
+impl FileActionExtractConfig {
+    pub(crate) fn new(
+        add_path_index: usize,
+        remove_path_index: usize,
+        add_dv_start_index: usize,
+        remove_dv_start_index: usize,
+        skip_removes: bool,
+    ) -> Self {
+        Self {
+            add_path_index,
+            remove_path_index,
+            add_dv_start_index,
+            remove_dv_start_index,
+            skip_removes,
+        }
     }
 }
 
@@ -786,58 +819,64 @@ impl<'seen> FileActionDeduplicator<'seen> {
         }
     }
 
-    /// Extract file action key and determine if it's an add operation
+    /// Extracts a file action key and determines if it's an add operation.
+    ///
+    /// This method examines the data at the given index using the provided getters and config
+    /// to identify whether a file action exists and what type it is.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - Index position in the data structure to examine
+    /// * `getters` - Collection of data getter implementations used to access the data
+    /// * `config` - Configuration specifying where to find add/remove operations
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some((key, is_add)))` - When a file action is found, returns the key and whether it's an add operation
+    /// * `Ok(None)` - When no file action is found
+    /// * `Err(...)` - On any error during extraction
     pub(crate) fn extract_file_action<'a>(
         &self,
         i: usize,
         getters: &[&'a dyn GetData<'a>],
-        add_path_index: usize,
-        remove_path_index: usize,
-        add_dv_start_index: usize,
-        remove_dv_start_index: usize,
-        skip_removes: bool,
+        config: FileActionExtractConfig,
     ) -> DeltaResult<Option<(FileActionKey, bool)>> {
         // Try to extract an add action path
-        if let Some(path) = getters[add_path_index].get_str(i, "add.path")? {
+        if let Some(path) = getters[config.add_path_index].get_str(i, "add.path")? {
             let dv_unique_id =
-                self.extract_dv_unique_id(i, getters, Some(add_dv_start_index), None)?;
+                self.extract_dv_unique_id(i, getters, Some(config.add_dv_start_index), None)?;
             return Ok(Some((FileActionKey::new(path, dv_unique_id), true)));
         }
 
-        // The AddRemoveDedupVisitor does not include remove action getters when
-        // dealing with non-log batches (since they are not needed for deduplication).
-        // In this case, we should skip remove actions.
-        if skip_removes {
+        // The AddRemoveDedupVisitor skips remove actions when extracting file actions from a checkpoint file.
+        if config.skip_removes {
             return Ok(None);
         }
 
         // Try to extract a remove action path
-        if let Some(path) = getters[remove_path_index].get_str(i, "remove.path")? {
+        if let Some(path) = getters[config.remove_path_index].get_str(i, "remove.path")? {
             let dv_unique_id =
-                self.extract_dv_unique_id(i, getters, None, Some(remove_dv_start_index))?;
+                self.extract_dv_unique_id(i, getters, None, Some(config.remove_dv_start_index))?;
             return Ok(Some((FileActionKey::new(path, dv_unique_id), false)));
         }
 
-        // If we didn't find an add or remove action, return None
-        return Ok(None);
+        // No file action found
+        Ok(None)
     }
 
-    /// Get the selection vector
     pub(crate) fn selection_vector(self) -> Vec<bool> {
         self.selection_vector
     }
 
-    /// Get reference to the selection vector
     pub(crate) fn selection_vector_ref(&self) -> &Vec<bool> {
         &self.selection_vector
     }
 
-    /// Get mutable reference to the selection vector
     pub(crate) fn selection_vector_mut(&mut self) -> &mut Vec<bool> {
         &mut self.selection_vector
     }
 
-    /// Get whether we are processing a log batch
+    /// Returns whether we are currently processing a log batch.
     pub(crate) fn is_log_batch(&self) -> bool {
         self.is_log_batch
     }
@@ -1261,7 +1300,7 @@ mod tests {
         assert_eq!(visitor.seen_txns.len(), 1);
         assert_eq!(visitor.total_non_file_actions, 3);
 
-        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.deduplicator.selection_vector, expected);
         Ok(())
     }
 
@@ -1291,7 +1330,7 @@ mod tests {
 
         // Only "one_above_threshold" should be kept
         let expected = vec![false, false, true, false];
-        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.deduplicator.selection_vector, expected);
         assert_eq!(visitor.total_file_actions, 1);
         assert_eq!(visitor.total_add_actions, 0);
         assert_eq!(visitor.total_non_file_actions, 0);
@@ -1317,7 +1356,7 @@ mod tests {
 
         // First one should be included, second one skipped as a duplicate
         let expected = vec![true, false];
-        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.deduplicator.selection_vector, expected);
         assert_eq!(visitor.total_file_actions, 1);
         assert_eq!(visitor.total_add_actions, 1);
         assert_eq!(visitor.total_non_file_actions, 0);
@@ -1350,7 +1389,7 @@ mod tests {
 
         // Both should be included since we don't track duplicates in checkpoint batches
         let expected = vec![true, true];
-        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.deduplicator.selection_vector, expected);
         assert_eq!(visitor.total_file_actions, 2);
         assert_eq!(visitor.total_add_actions, 2);
         assert_eq!(visitor.total_non_file_actions, 0);
@@ -1377,7 +1416,7 @@ mod tests {
         visitor.visit_rows_of(batch.as_ref())?;
 
         let expected = vec![true, true, false]; // Third one is a duplicate
-        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.deduplicator.selection_vector, expected);
         assert_eq!(visitor.total_file_actions, 2);
         assert_eq!(visitor.total_add_actions, 2);
         assert_eq!(visitor.total_non_file_actions, 0);
@@ -1402,7 +1441,7 @@ mod tests {
         visitor.visit_rows_of(batch.as_ref())?;
 
         let expected = vec![true, true, true];
-        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.deduplicator.selection_vector, expected);
         assert!(visitor.seen_protocol);
         assert!(visitor.seen_metadata);
         assert_eq!(visitor.seen_txns.len(), 1);
@@ -1442,7 +1481,7 @@ mod tests {
 
         // All actions should be skipped as they have already been seen
         let expected = vec![false, false, false];
-        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.deduplicator.selection_vector, expected);
         assert_eq!(visitor.total_non_file_actions, 0);
         assert_eq!(visitor.total_file_actions, 0);
 
@@ -1478,7 +1517,7 @@ mod tests {
 
         // First occurrence of each type should be included
         let expected = vec![true, false, true, true, false, true, false];
-        assert_eq!(visitor.file_deduplicator.selection_vector, expected);
+        assert_eq!(visitor.deduplicator.selection_vector, expected);
         assert_eq!(visitor.seen_txns.len(), 2); // Two different app IDs
         assert_eq!(visitor.total_non_file_actions, 4); // 2 txns + 1 protocol + 1 metadata
         assert_eq!(visitor.total_file_actions, 0);
