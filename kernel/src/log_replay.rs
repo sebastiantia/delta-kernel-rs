@@ -178,7 +178,7 @@ impl<'seen> FileActionDeduplicator<'seen> {
         Ok(None)
     }
 
-    pub(crate) fn selection_vector(self) -> Vec<bool> {
+    pub(crate) fn into_selection_vector(self) -> Vec<bool> {
         self.selection_vector
     }
 

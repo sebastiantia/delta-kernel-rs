@@ -148,6 +148,10 @@ impl AddRemoveDedupVisitor<'_> {
     /// True if this row contains an Add action that should survive log replay. Skip it if the row
     /// is not an Add action, or the file has already been seen previously.
     fn is_valid_add<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
+        // When processing file actions, we extract path and deletion vector information based on action type:
+        // - For Add actions: path is at index 0, followed by DV fields at indexes 2-4
+        // - For Remove actions (in log batches only): path is at index 5, followed by DV fields at indexes 6-8
+        // The file extraction logic selects the appropriate indexes based on whether we found a valid path.
         // Remove getters are not included when visiting a non-log batch (checkpoint batch), so do
         // not try to extract remove actions in that case.
         let Some((file_key, is_add)) =
@@ -324,7 +328,7 @@ impl LogReplayScanner {
         visitor.visit_rows_of(actions)?;
 
         // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
-        let selection_vector = visitor.deduplicator.selection_vector();
+        let selection_vector = visitor.deduplicator.into_selection_vector();
         let result = add_transform.evaluate(actions)?;
         Ok((result, selection_vector, visitor.row_transform_exprs))
     }
