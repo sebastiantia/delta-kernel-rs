@@ -18,8 +18,8 @@ use std::collections::HashSet;
 
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
 use crate::engine_data::{GetData, TypedGetData};
+use crate::log_replay::FileActionKeyType::{Add, Remove};
 use crate::DeltaResult;
-
 use tracing::debug;
 
 /// The subset of file action fields that uniquely identifies it in the log, used for deduplication
@@ -28,12 +28,29 @@ use tracing::debug;
 pub(crate) struct FileActionKey {
     pub(crate) path: String,
     pub(crate) dv_unique_id: Option<String>,
+    pub(crate) action_type: FileActionKeyType,
 }
+
 impl FileActionKey {
-    pub(crate) fn new(path: impl Into<String>, dv_unique_id: Option<String>) -> Self {
+    pub(crate) fn new(
+        path: impl Into<String>,
+        dv_unique_id: Option<String>,
+        action_type: FileActionKeyType,
+    ) -> Self {
         let path = path.into();
-        Self { path, dv_unique_id }
+        Self {
+            path,
+            dv_unique_id,
+            action_type,
+        }
     }
+}
+
+// File actions are either add or remove actions.
+#[derive(Debug, Hash, Eq, PartialEq)]
+pub(crate) enum FileActionKeyType {
+    Add,
+    Remove,
 }
 
 /// Maintains state and provides functionality for deduplicating file actions during log replay.
@@ -144,7 +161,7 @@ impl<'seen> FileActionDeduplicator<'seen> {
     ///
     /// # Returns
     ///
-    /// * `Ok(Some((key, is_add)))` - When a file action is found, returns the key and whether it's an add operation
+    /// * `Ok(Some((key))` - When a file action is found, returns the key
     /// * `Ok(None)` - When no file action is found
     /// * `Err(...)` - On any error during extraction
     pub(crate) fn extract_file_action<'a>(
@@ -152,11 +169,11 @@ impl<'seen> FileActionDeduplicator<'seen> {
         i: usize,
         getters: &[&'a dyn GetData<'a>],
         skip_removes: bool,
-    ) -> DeltaResult<Option<(FileActionKey, bool)>> {
+    ) -> DeltaResult<Option<FileActionKey>> {
         // Try to extract an add action by the required path column
         if let Some(path) = getters[self.add_path_index].get_str(i, "add.path")? {
             let dv_unique_id = self.extract_dv_unique_id(i, getters, self.add_dv_start_index)?;
-            return Ok(Some((FileActionKey::new(path, dv_unique_id), true)));
+            return Ok(Some(FileActionKey::new(path, dv_unique_id, Add)));
         }
 
         // The AddRemoveDedupVisitor skips remove actions when extracting file actions from a checkpoint batch.
@@ -167,7 +184,7 @@ impl<'seen> FileActionDeduplicator<'seen> {
         // Try to extract a remove action by the required path column
         if let Some(path) = getters[self.remove_path_index].get_str(i, "remove.path")? {
             let dv_unique_id = self.extract_dv_unique_id(i, getters, self.remove_dv_start_index)?;
-            return Ok(Some((FileActionKey::new(path, dv_unique_id), false)));
+            return Ok(Some(FileActionKey::new(path, dv_unique_id, Remove)));
         }
 
         // No file action found
