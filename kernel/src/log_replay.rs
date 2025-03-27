@@ -5,8 +5,8 @@
 //! The logs, which record all table changes as JSON entries, are processed batch by batch,
 //! typically from newest to oldest.
 //!
-//! Log replay is currently implemented for table scans, which filter and apply transofmations
-//! to file actions to produce a view of the table state at a specific point in time.  
+//! Log replay is currently implemented for table scans, which filter and apply transformations
+//! to produce file actions which builds the view of the table state at a specific point in time.  
 //! Future extensions will support additional log replay processors beyond the current use case.
 //! (e.g. checkpointing: filter actions to include only those needed to rebuild table state)
 //!
