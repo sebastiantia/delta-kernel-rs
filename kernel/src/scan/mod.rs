@@ -325,7 +325,6 @@ pub(crate) enum TransformExpr {
 // (data, deletion_vec, transforms)
 pub type ScanData = (Box<dyn EngineData>, Vec<bool>, Vec<Option<ExpressionRef>>);
 
-// Implementation for the scan result type
 impl HasSelectionVector for ScanData {
     fn has_selected_rows(&self) -> bool {
         self.1.contains(&true)
