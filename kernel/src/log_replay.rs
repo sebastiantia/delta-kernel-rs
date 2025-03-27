@@ -48,8 +48,6 @@ pub(crate) struct FileActionDeduplicator<'seen> {
     /// far in the log for deduplication. This is a mutable reference to the set
     /// of seen file keys that persists across multiple log batches.
     seen_file_keys: &'seen mut HashSet<FileActionKey>,
-    /// Selection vector to track which rows should be included
-    selection_vector: Vec<bool>,
     /// Whether we're processing a log batch (as opposed to a checkpoint)
     is_log_batch: bool,
     /// Index of the getter containing the add.path column
@@ -65,7 +63,6 @@ pub(crate) struct FileActionDeduplicator<'seen> {
 impl<'seen> FileActionDeduplicator<'seen> {
     pub(crate) fn new(
         seen_file_keys: &'seen mut HashSet<FileActionKey>,
-        selection_vector: Vec<bool>,
         is_log_batch: bool,
         add_path_index: usize,
         remove_path_index: usize,
@@ -74,7 +71,6 @@ impl<'seen> FileActionDeduplicator<'seen> {
     ) -> Self {
         Self {
             seen_file_keys,
-            selection_vector,
             is_log_batch,
             add_path_index,
             remove_path_index,
@@ -176,18 +172,6 @@ impl<'seen> FileActionDeduplicator<'seen> {
 
         // No file action found
         Ok(None)
-    }
-
-    pub(crate) fn into_selection_vector(self) -> Vec<bool> {
-        self.selection_vector
-    }
-
-    pub(crate) fn selection_vector_ref(&self) -> &Vec<bool> {
-        &self.selection_vector
-    }
-
-    pub(crate) fn selection_vector_mut(&mut self) -> &mut Vec<bool> {
-        &mut self.selection_vector
     }
 
     /// Returns whether we are currently processing a log batch.

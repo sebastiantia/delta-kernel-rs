@@ -36,6 +36,7 @@ struct AddRemoveDedupVisitor<'seen> {
     transform: Option<Arc<Transform>>,
     partition_filter: Option<ExpressionRef>,
     row_transform_exprs: Vec<Option<ExpressionRef>>,
+    selection_vector: Vec<bool>,
 }
 
 impl AddRemoveDedupVisitor<'_> {
@@ -57,7 +58,6 @@ impl AddRemoveDedupVisitor<'_> {
         AddRemoveDedupVisitor {
             deduplicator: FileActionDeduplicator::new(
                 seen,
-                selection_vector,
                 is_log_batch,
                 Self::ADD_PATH_INDEX,
                 Self::REMOVE_PATH_INDEX,
@@ -68,6 +68,7 @@ impl AddRemoveDedupVisitor<'_> {
             transform,
             partition_filter,
             row_transform_exprs: Vec::new(),
+            selection_vector,
         }
     }
 
@@ -244,8 +245,8 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
         );
 
         for i in 0..row_count {
-            if self.deduplicator.selection_vector_ref()[i] {
-                self.deduplicator.selection_vector_mut()[i] = self.is_valid_add(i, getters)?;
+            if self.selection_vector[i] {
+                self.selection_vector[i] = self.is_valid_add(i, getters)?;
             }
         }
         Ok(())
@@ -328,9 +329,12 @@ impl LogReplayScanner {
         visitor.visit_rows_of(actions)?;
 
         // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
-        let selection_vector = visitor.deduplicator.into_selection_vector();
         let result = add_transform.evaluate(actions)?;
-        Ok((result, selection_vector, visitor.row_transform_exprs))
+        Ok((
+            result,
+            visitor.selection_vector,
+            visitor.row_transform_exprs,
+        ))
     }
 }
 
