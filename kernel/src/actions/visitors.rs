@@ -559,6 +559,8 @@ impl CheckpointVisitor<'_> {
     fn is_expired_tombstone<'a>(&self, i: usize, getter: &'a dyn GetData<'a>) -> DeltaResult<bool> {
         // Ideally this should never be zero, but we are following the same behavior as Delta
         // Spark and the Java Kernel.
+        // Note: When remove.deletion_timestamp is not present (defaulting to 0), the remove action
+        // will be excluded from the checkpoint file as it will be treated as expired.
         let mut deletion_timestamp: i64 = 0;
         if let Some(ts) = getter.get_opt(i, "remove.deletionTimestamp")? {
             deletion_timestamp = ts;
