@@ -1,4 +1,20 @@
-//! This module provides structures and functionality to faciliate the log replay process.
+//! This module provides log replay utilities.
+//!
+//! Log replay is the process of transforming an iterator of action batches (read from Delta
+//! transaction logs) into an iterator of filtered/transformed actions for specific use cases.
+//! The logs, which record all table changes as JSON entries, are processed batch by batch,
+//! typically from newest to oldest.
+//!
+//! Log replay can be implemented in various ways:
+//! - For table scans: Deduplicate file actions to identify the current set of valid files
+//! - For checkpointing: Filter actions to include only those needed to rebuild table state
+//!
+//! This module provides structures for efficient batch processing, focusing on file action
+//! deduplication with `FileActionDeduplicator` which tracks unique files across log batches
+//! to minimize memory usage for tables with extensive history.
+//!
+//! Future extensions will support additional log replay processors beyond the current use cases.
+
 use std::collections::HashSet;
 
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
