@@ -18,7 +18,7 @@ use std::collections::HashSet;
 
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
 use crate::engine_data::{GetData, TypedGetData};
-use crate::DeltaResult;
+use crate::{DeltaResult, EngineData};
 
 use tracing::debug;
 
@@ -178,4 +178,56 @@ impl<'seen> FileActionDeduplicator<'seen> {
     pub(crate) fn is_log_batch(&self) -> bool {
         self.is_log_batch
     }
+}
+
+/// Trait defining log replay processors which implement custom filtering and transformation
+/// logic for processing action batches from transaction logs. They receive batches in reverse
+/// chronological order (newest to oldest) and typically:
+///
+/// 1. Create or maintain a selection vector to track which actions to include
+/// 2. Track already-seen file actions to deduplicate across batches
+/// 3. Apply specialized filtering based on processor type (scan, checkpoint, etc.)
+///
+pub(crate) trait LogReplayProcessor {
+    /// The type of results produced by this processor
+    type Output;
+
+    /// Process a batch of actions and return the filtered result
+    fn process_actions_batch(
+        &mut self,
+        batch: Box<dyn EngineData>,
+        is_log_batch: bool,
+    ) -> DeltaResult<Self::Output>;
+
+    // Get a reference to the set of seen file keys
+    fn seen_file_keys(&mut self) -> &mut HashSet<FileActionKey>;
+
+    /// Applies a processor to an action iterator and filters out empty results.
+    ///
+    /// This is an associated function rather than an instance method because the
+    /// returned iterator needs to own the processor.
+    fn apply_to_iterator(
+        processor: impl LogReplayProcessor<Output = Self::Output>,
+        action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
+    ) -> impl Iterator<Item = DeltaResult<Self::Output>>
+    where
+        Self::Output: HasSelectionVector,
+    {
+        let mut processor = processor;
+        action_iter
+            .map(move |action_res| {
+                let (batch, is_log_batch) = action_res?;
+                processor.process_actions_batch(batch, is_log_batch)
+            })
+            .filter(|res| {
+                res.as_ref()
+                    .map_or(true, |result| result.has_selected_rows())
+            })
+    }
+}
+
+/// Trait for types that contain a selection vector used in log replay filtering.
+pub(crate) trait HasSelectionVector {
+    /// Check if the selection vector contains at least one selected row
+    fn has_selected_rows(&self) -> bool;
 }
