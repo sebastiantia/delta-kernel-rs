@@ -503,13 +503,14 @@ impl RowVisitor for SidecarVisitor {
 /// the latest valid state of the table.
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct CheckpointVisitor<'seen> {
-    // File actions deduplication state
+    // File actions state
     deduplicator: FileActionDeduplicator<'seen>,
+    selection_vector: Vec<bool>,
     total_file_actions: usize,
     total_add_actions: usize,
     minimum_file_retention_timestamp: i64,
 
-    // Non-file actions deduplication state
+    // Non-file actions state
     seen_protocol: bool,
     seen_metadata: bool,
     seen_txns: &'seen mut HashSet<String>,
@@ -527,21 +528,21 @@ impl CheckpointVisitor<'_> {
     /// Create a new CheckpointVisitor
     fn new<'seen>(
         seen_file_keys: &'seen mut HashSet<FileActionKey>,
-        seen_txns: &'seen mut HashSet<String>,
-        selection_vector: Vec<bool>,
         is_log_batch: bool,
+        selection_vector: Vec<bool>,
+        seen_txns: &'seen mut HashSet<String>,
         minimum_file_retention_timestamp: i64,
     ) -> CheckpointVisitor<'seen> {
         CheckpointVisitor {
             deduplicator: FileActionDeduplicator::new(
                 seen_file_keys,
-                selection_vector,
                 is_log_batch,
                 Self::ADD_PATH_INDEX,
                 Self::REMOVE_PATH_INDEX,
                 Self::ADD_DV_START_INDEX,
                 Self::REMOVE_DV_START_INDEX,
             ),
+            selection_vector,
             total_file_actions: 0,
             total_add_actions: 0,
             minimum_file_retention_timestamp,
@@ -706,7 +707,7 @@ impl RowVisitor for CheckpointVisitor<'_> {
 
             // Mark the row for selection if it's either a valid non-file or file action
             if is_non_file_action || is_file_action {
-                self.deduplicator.selection_vector_mut()[i] = true;
+                self.selection_vector[i] = true;
             }
         }
         Ok(())
@@ -998,9 +999,9 @@ mod tests {
         let mut seen_txns = HashSet::new();
         let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
-            &mut seen_txns,
-            vec![false; 8],
             true,
+            vec![false; 8],
+            &mut seen_txns,
             0, // minimum_file_retention_timestamp (no expired tombstones)
         );
 
@@ -1024,7 +1025,7 @@ mod tests {
         assert_eq!(visitor.seen_txns.len(), 1);
         assert_eq!(visitor.total_non_file_actions, 3);
 
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
+        assert_eq!(visitor.selection_vector, expected);
         Ok(())
     }
 
@@ -1044,9 +1045,9 @@ mod tests {
         let mut seen_txns = HashSet::new();
         let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
-            &mut seen_txns,
-            vec![false; 4],
             true,
+            vec![false; 4],
+            &mut seen_txns,
             100, // minimum_file_retention_timestamp (threshold set to 100)
         );
 
@@ -1054,7 +1055,7 @@ mod tests {
 
         // Only "one_above_threshold" should be kept
         let expected = vec![false, false, true, false];
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
+        assert_eq!(visitor.selection_vector, expected);
         assert_eq!(visitor.total_file_actions, 1);
         assert_eq!(visitor.total_add_actions, 0);
         assert_eq!(visitor.total_non_file_actions, 0);
@@ -1074,13 +1075,13 @@ mod tests {
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
         let mut visitor =
-            CheckpointVisitor::new(&mut seen_file_keys, &mut seen_txns, vec![false; 2], true, 0);
+            CheckpointVisitor::new(&mut seen_file_keys, true, vec![false; 2], &mut seen_txns, 0);
 
         visitor.visit_rows_of(batch.as_ref())?;
 
         // First one should be included, second one skipped as a duplicate
         let expected = vec![true, false];
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
+        assert_eq!(visitor.selection_vector, expected);
         assert_eq!(visitor.total_file_actions, 1);
         assert_eq!(visitor.total_add_actions, 1);
         assert_eq!(visitor.total_non_file_actions, 0);
@@ -1103,9 +1104,9 @@ mod tests {
         let mut seen_txns = HashSet::new();
         let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
-            &mut seen_txns,
-            vec![false; 2],
             false, // is_log_batch = false (checkpoint batch)
+            vec![false; 2],
+            &mut seen_txns,
             0,
         );
 
@@ -1113,7 +1114,7 @@ mod tests {
 
         // Both should be included since we don't track duplicates in checkpoint batches
         let expected = vec![true, true];
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
+        assert_eq!(visitor.selection_vector, expected);
         assert_eq!(visitor.total_file_actions, 2);
         assert_eq!(visitor.total_add_actions, 2);
         assert_eq!(visitor.total_non_file_actions, 0);
@@ -1135,12 +1136,12 @@ mod tests {
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
         let mut visitor =
-            CheckpointVisitor::new(&mut seen_file_keys, &mut seen_txns, vec![false; 3], true, 0);
+            CheckpointVisitor::new(&mut seen_file_keys, true, vec![false; 3], &mut seen_txns, 0);
 
         visitor.visit_rows_of(batch.as_ref())?;
 
         let expected = vec![true, true, false]; // Third one is a duplicate
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
+        assert_eq!(visitor.selection_vector, expected);
         assert_eq!(visitor.total_file_actions, 2);
         assert_eq!(visitor.total_add_actions, 2);
         assert_eq!(visitor.total_non_file_actions, 0);
@@ -1160,12 +1161,12 @@ mod tests {
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
         let mut visitor =
-            CheckpointVisitor::new(&mut seen_file_keys, &mut seen_txns, vec![false; 3], true, 0);
+            CheckpointVisitor::new(&mut seen_file_keys, true, vec![false; 3], &mut seen_txns, 0);
 
         visitor.visit_rows_of(batch.as_ref())?;
 
         let expected = vec![true, true, true];
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
+        assert_eq!(visitor.selection_vector, expected);
         assert!(visitor.seen_protocol);
         assert!(visitor.seen_metadata);
         assert_eq!(visitor.seen_txns.len(), 1);
@@ -1191,9 +1192,9 @@ mod tests {
 
         let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
-            &mut seen_txns, // Pre-populated transaction
-            vec![false; 3],
             true,
+            vec![false; 3],
+            &mut seen_txns, // Pre-populated transaction
             0,
         );
 
@@ -1205,7 +1206,7 @@ mod tests {
 
         // All actions should be skipped as they have already been seen
         let expected = vec![false, false, false];
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
+        assert_eq!(visitor.selection_vector, expected);
         assert_eq!(visitor.total_non_file_actions, 0);
         assert_eq!(visitor.total_file_actions, 0);
 
@@ -1231,17 +1232,17 @@ mod tests {
         let mut seen_txns = HashSet::new();
         let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
-            &mut seen_txns,
-            vec![false; 7],
             true, // is_log_batch
-            0,    // minimum_file_retention_timestamp
+            vec![false; 7],
+            &mut seen_txns,
+            0, // minimum_file_retention_timestamp
         );
 
         visitor.visit_rows_of(batch.as_ref())?;
 
         // First occurrence of each type should be included
         let expected = vec![true, false, true, true, false, true, false];
-        assert_eq!(visitor.deduplicator.selection_vector(), expected);
+        assert_eq!(visitor.selection_vector, expected);
         assert_eq!(visitor.seen_txns.len(), 2); // Two different app IDs
         assert_eq!(visitor.total_non_file_actions, 4); // 2 txns + 1 protocol + 1 metadata
         assert_eq!(visitor.total_file_actions, 0);
