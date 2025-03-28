@@ -335,6 +335,7 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
         let logical_schema = self.logical_schema.clone();
         let transform = self.transform.clone();
         let partition_filter = self.partition_filter.clone();
+        // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
         let result = self.add_transform.evaluate(batch.as_ref())?;
 
         let mut visitor = AddRemoveDedupVisitor::new(
@@ -347,9 +348,6 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
         );
 
         visitor.visit_rows_of(batch.as_ref())?;
-
-        // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
-        let result = add_transform.evaluate(actions)?;
         Ok((
             result,
             visitor.selection_vector,
