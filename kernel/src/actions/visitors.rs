@@ -497,6 +497,8 @@ impl RowVisitor for SidecarVisitor {
 /// - Keeps only the first metadata action
 /// - Keeps only the first transaction action for each unique app ID
 ///
+/// CommitInfo, CDC, and sidecar actions are NOT part of the V1 spec checkpoint schema.
+///
 /// This filtered set of actions represents the minimal set needed to reconstruct
 /// the latest valid state of the table.
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
