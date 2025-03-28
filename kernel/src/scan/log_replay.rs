@@ -10,7 +10,7 @@ use crate::actions::get_log_add_schema;
 use crate::actions::visitors::{FileActionDeduplicator, FileActionExtractConfig};
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
-use crate::log_replay::{apply_processor_to_iterator, FileActionKey, LogReplayProcessor};
+use crate::log_replay::{FileActionDeduplicator, FileActionKey, LogReplayProcessor};
 use crate::predicates::{DefaultPredicateEvaluator, PredicateEvaluator as _};
 use crate::scan::{Scalar, TransformExpr};
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
@@ -29,12 +29,36 @@ struct ScanLogReplayProcessor {
     seen_file_keys: HashSet<FileActionKey>,
 }
 
+impl ScanLogReplayProcessor {
+    /// Create a new [`ScanLogReplayProcessor`] instance
+    fn new(
+        engine: &dyn Engine,
+        physical_predicate: Option<(ExpressionRef, SchemaRef)>,
+        logical_schema: SchemaRef,
+        transform: Option<Arc<Transform>>,
+    ) -> Self {
+        Self {
+            partition_filter: physical_predicate.as_ref().map(|(e, _)| e.clone()),
+            data_skipping_filter: DataSkippingFilter::new(engine, physical_predicate),
+            add_transform: engine.get_expression_handler().get_evaluator(
+                get_log_add_schema().clone(),
+                get_add_transform_expr(),
+                SCAN_ROW_DATATYPE.clone(),
+            ),
+            seen_file_keys: Default::default(),
+            logical_schema,
+            transform,
+        }
+    }
+}
+
 /// A visitor that deduplicates a stream of add and remove actions into a stream of valid adds. Log
 /// replay visits actions newest-first, so once we've seen a file action for a given (path, dvId)
 /// pair, we should ignore all subsequent (older) actions for that same (path, dvId) pair. If the
 /// first action for a given file is a remove, then that file does not show up in the result at all.
 struct AddRemoveDedupVisitor<'seen> {
     deduplicator: FileActionDeduplicator<'seen>,
+    selection_vector: Vec<bool>,
     logical_schema: SchemaRef,
     transform: Option<Arc<Transform>>,
     partition_filter: Option<ExpressionRef>,
@@ -42,6 +66,13 @@ struct AddRemoveDedupVisitor<'seen> {
 }
 
 impl AddRemoveDedupVisitor<'_> {
+    // The index position in the row getters for the following columns
+    const ADD_PATH_INDEX: usize = 0;
+    const ADD_PARTITION_VALUES_INDEX: usize = 1;
+    const ADD_DV_START_INDEX: usize = 2;
+    const REMOVE_PATH_INDEX: usize = 5;
+    const REMOVE_DV_START_INDEX: usize = 6;
+
     fn new(
         seen: &mut HashSet<FileActionKey>,
         selection_vector: Vec<bool>,
@@ -51,7 +82,15 @@ impl AddRemoveDedupVisitor<'_> {
         is_log_batch: bool,
     ) -> AddRemoveDedupVisitor<'_> {
         AddRemoveDedupVisitor {
-            deduplicator: FileActionDeduplicator::new(seen, selection_vector, is_log_batch),
+            deduplicator: FileActionDeduplicator::new(
+                seen,
+                is_log_batch,
+                Self::ADD_PATH_INDEX,
+                Self::REMOVE_PATH_INDEX,
+                Self::ADD_DV_START_INDEX,
+                Self::REMOVE_DV_START_INDEX,
+            ),
+            selection_vector,
             logical_schema,
             transform,
             partition_filter,
@@ -136,10 +175,16 @@ impl AddRemoveDedupVisitor<'_> {
     /// True if this row contains an Add action that should survive log replay. Skip it if the row
     /// is not an Add action, or the file has already been seen previously.
     fn is_valid_add<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
+        // When processing file actions, we extract path and deletion vector information based on action type:
+        // - For Add actions: path is at index 0, followed by DV fields at indexes 2-4
+        // - For Remove actions (in log batches only): path is at index 5, followed by DV fields at indexes 6-8
+        // The file extraction logic selects the appropriate indexes based on whether we found a valid path.
+        // Remove getters are not included when visiting a non-log batch (checkpoint batch), so do
+        // not try to extract remove actions in that case.
         let Some((file_key, is_add)) = self.deduplicator.extract_file_action(
             i,
             getters,
-            FileActionExtractConfig::new(0, 5, 2, 6, !self.deduplicator.is_log_batch()),
+            !self.deduplicator.is_log_batch(), // skip_removes. true if this is a checkpoint batch
         )?
         else {
             return Ok(false);
@@ -153,7 +198,8 @@ impl AddRemoveDedupVisitor<'_> {
         // encounter if the table's schema was replaced after the most recent checkpoint.
         let partition_values = match &self.transform {
             Some(transform) if is_add => {
-                let partition_values = getters[1].get(i, "add.partitionValues")?;
+                let partition_values =
+                    getters[Self::ADD_PARTITION_VALUES_INDEX].get(i, "add.partitionValues")?;
                 let partition_values = self.parse_partition_values(transform, &partition_values)?;
                 if self.is_file_partition_pruned(&partition_values) {
                     return Ok(false);
@@ -213,11 +259,8 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
     }
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        let expected_getters = if self.deduplicator.is_log_batch() {
-            9
-        } else {
-            5
-        };
+        let is_log_batch = self.deduplicator.is_log_batch();
+        let expected_getters = if is_log_batch { 9 } else { 5 };
         require!(
             getters.len() == expected_getters,
             Error::InternalError(format!(
@@ -275,13 +318,13 @@ fn get_add_transform_expr() -> Expression {
 }
 
 impl LogReplayProcessor for ScanLogReplayProcessor {
-    type ProcessingResult = ScanData;
+    type Output = ScanData;
 
-    fn process_batch(
+    fn process_actions_batch(
         &mut self,
         batch: Box<dyn EngineData>,
         is_log_batch: bool,
-    ) -> DeltaResult<Self::ProcessingResult> {
+    ) -> DeltaResult<Self::Output> {
         // Apply data skipping to get back a selection vector for actions that passed skipping. We
         // will update the vector below as log replay identifies duplicates that should be ignored.
         let selection_vector = match &self.data_skipping_filter {
@@ -293,6 +336,7 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
         let logical_schema = self.logical_schema.clone();
         let transform = self.transform.clone();
         let partition_filter = self.partition_filter.clone();
+        // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
         let result = self.add_transform.evaluate(batch.as_ref())?;
 
         let mut visitor = AddRemoveDedupVisitor::new(
@@ -305,10 +349,15 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
         );
 
         visitor.visit_rows_of(batch.as_ref())?;
+        Ok((
+            result,
+            visitor.selection_vector,
+            visitor.row_transform_exprs,
+        ))
+    }
 
-        // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
-        let selection_vector = visitor.deduplicator.selection_vector();
-        Ok((result, selection_vector, visitor.row_transform_exprs))
+    fn seen_file_keys(&mut self) -> &mut HashSet<FileActionKey> {
+        &mut self.seen_file_keys
     }
 
     fn seen_file_keys(&mut self) -> &mut HashSet<FileActionKey> {
@@ -353,7 +402,7 @@ pub(crate) fn scan_action_iter(
     let log_scanner =
         ScanLogReplayProcessor::new(engine, physical_predicate, logical_schema, transform);
 
-    apply_processor_to_iterator(log_scanner, action_iter)
+    ScanLogReplayProcessor::apply_to_iterator(log_scanner, action_iter)
 }
 
 #[cfg(test)]
