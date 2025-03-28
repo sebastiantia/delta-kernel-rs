@@ -1,12 +1,10 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::actions::visitors::CheckpointVisitor;
 use crate::engine_data::RowVisitor;
-use crate::log_replay::{
-    apply_processor_to_iterator, FileActionKey, HasSelectionVector, LogReplayProcessor,
-};
+use crate::log_replay::{FileActionKey, HasSelectionVector, LogReplayProcessor};
 use crate::{DeltaResult, EngineData};
 
 pub struct CheckpointData {
@@ -30,10 +28,10 @@ struct CheckpointLogReplayProcessor {
     seen_file_keys: HashSet<FileActionKey>,
 
     /// Counter for the total number of actions processed during log replay.
-    total_actions: Arc<AtomicUsize>,
+    total_actions: Arc<AtomicU64>,
 
     /// Counter for the total number of add actions processed during log replay.
-    total_add_actions: Arc<AtomicUsize>,
+    total_add_actions: Arc<AtomicU64>,
 
     /// Indicates whether a protocol action has been seen in the log.
     seen_protocol: bool,
@@ -50,7 +48,7 @@ struct CheckpointLogReplayProcessor {
 
 impl LogReplayProcessor for CheckpointLogReplayProcessor {
     // Define the processing result type as a tuple of the data and selection vector
-    type ProcessingResult = CheckpointData;
+    type Output = CheckpointData;
 
     /// This function processes batches of actions in reverse chronological order
     /// (from most recent to least recent) and performs the necessary filtering
@@ -65,11 +63,11 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
     /// 2. For each app ID, only the most recent transaction action is included
     /// 3. File actions are deduplicated based on path and unique ID
     /// 4. Tombstones older than `minimum_file_retention_timestamp` are excluded
-    fn process_batch(
+    fn process_actions_batch(
         &mut self,
         batch: Box<dyn EngineData>,
         is_log_batch: bool,
-    ) -> DeltaResult<Self::ProcessingResult> {
+    ) -> DeltaResult<Self::Output> {
         // Initialize selection vector with all rows un-selected
         let selection_vector = vec![false; batch.len()];
         assert_eq!(
@@ -106,7 +104,7 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
 
         Ok(CheckpointData {
             data: batch,
-            selection_vector: visitor.deduplicator.selection_vector(),
+            selection_vector: visitor.selection_vector,
         })
     }
 
@@ -119,8 +117,8 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
 #[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
 impl CheckpointLogReplayProcessor {
     pub(super) fn new(
-        total_actions_counter: Arc<AtomicUsize>,
-        total_add_actions_counter: Arc<AtomicUsize>,
+        total_actions_counter: Arc<AtomicU64>,
+        total_add_actions_counter: Arc<AtomicU64>,
         minimum_file_retention_timestamp: i64,
     ) -> Self {
         Self {
@@ -146,8 +144,8 @@ impl CheckpointLogReplayProcessor {
 #[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
 pub(crate) fn checkpoint_actions_iter(
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send + 'static,
-    total_actions_counter: Arc<AtomicUsize>,
-    total_add_actions_counter: Arc<AtomicUsize>,
+    total_actions_counter: Arc<AtomicU64>,
+    total_add_actions_counter: Arc<AtomicU64>,
     minimum_file_retention_timestamp: i64,
 ) -> impl Iterator<Item = DeltaResult<CheckpointData>> + Send + 'static {
     let mut log_scanner = CheckpointLogReplayProcessor::new(
@@ -156,12 +154,12 @@ pub(crate) fn checkpoint_actions_iter(
         minimum_file_retention_timestamp,
     );
 
-    apply_processor_to_iterator(log_scanner, action_iter)
+    CheckpointLogReplayProcessor::apply_to_iterator(log_scanner, action_iter)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
     use crate::arrow::array::StringArray;
@@ -175,8 +173,8 @@ mod tests {
     #[test]
     fn test_v1_checkpoint_actions_iter_multi_batch_integration() -> DeltaResult<()> {
         // Setup counters
-        let total_actions_counter = Arc::new(AtomicUsize::new(0));
-        let total_add_actions_counter = Arc::new(AtomicUsize::new(0));
+        let total_actions_counter = Arc::new(AtomicU64::new(0));
+        let total_add_actions_counter = Arc::new(AtomicU64::new(0));
 
         // Create first batch with protocol, metadata, and some files
         let json_strings1: StringArray = vec![

@@ -7,7 +7,6 @@ use itertools::Itertools;
 use super::data_skipping::DataSkippingFilter;
 use super::{ScanData, Transform};
 use crate::actions::get_log_add_schema;
-use crate::actions::visitors::{FileActionDeduplicator, FileActionExtractConfig};
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
 use crate::log_replay::{FileActionDeduplicator, FileActionKey, LogReplayProcessor};
@@ -27,29 +26,6 @@ struct ScanLogReplayProcessor {
     /// far in the log. This is used to filter out files with Remove actions as
     /// well as duplicate entries in the log.
     seen_file_keys: HashSet<FileActionKey>,
-}
-
-impl ScanLogReplayProcessor {
-    /// Create a new [`ScanLogReplayProcessor`] instance
-    fn new(
-        engine: &dyn Engine,
-        physical_predicate: Option<(ExpressionRef, SchemaRef)>,
-        logical_schema: SchemaRef,
-        transform: Option<Arc<Transform>>,
-    ) -> Self {
-        Self {
-            partition_filter: physical_predicate.as_ref().map(|(e, _)| e.clone()),
-            data_skipping_filter: DataSkippingFilter::new(engine, physical_predicate),
-            add_transform: engine.get_expression_handler().get_evaluator(
-                get_log_add_schema().clone(),
-                get_add_transform_expr(),
-                SCAN_ROW_DATATYPE.clone(),
-            ),
-            seen_file_keys: Default::default(),
-            logical_schema,
-            transform,
-        }
-    }
 }
 
 /// A visitor that deduplicates a stream of add and remove actions into a stream of valid adds. Log
@@ -270,8 +246,8 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
         );
 
         for i in 0..row_count {
-            if self.deduplicator.selection_vector_ref()[i] {
-                self.deduplicator.selection_vector_mut()[i] = self.is_valid_add(i, getters)?;
+            if self.selection_vector[i] {
+                self.selection_vector[i] = self.is_valid_add(i, getters)?;
             }
         }
         Ok(())
@@ -354,10 +330,6 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
             visitor.selection_vector,
             visitor.row_transform_exprs,
         ))
-    }
-
-    fn seen_file_keys(&mut self) -> &mut HashSet<FileActionKey> {
-        &mut self.seen_file_keys
     }
 
     fn seen_file_keys(&mut self) -> &mut HashSet<FileActionKey> {
