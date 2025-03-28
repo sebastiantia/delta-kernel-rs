@@ -32,11 +32,11 @@ struct LogReplayScanner {
 /// first action for a given file is a remove, then that file does not show up in the result at all.
 struct AddRemoveDedupVisitor<'seen> {
     deduplicator: FileActionDeduplicator<'seen>,
+    selection_vector: Vec<bool>,
     logical_schema: SchemaRef,
     transform: Option<Arc<Transform>>,
     partition_filter: Option<ExpressionRef>,
     row_transform_exprs: Vec<Option<ExpressionRef>>,
-    selection_vector: Vec<bool>,
 }
 
 impl AddRemoveDedupVisitor<'_> {
@@ -64,11 +64,11 @@ impl AddRemoveDedupVisitor<'_> {
                 Self::ADD_DV_START_INDEX,
                 Self::REMOVE_DV_START_INDEX,
             ),
+            selection_vector,
             logical_schema,
             transform,
             partition_filter,
             row_transform_exprs: Vec::new(),
-            selection_vector,
         }
     }
 
@@ -155,9 +155,11 @@ impl AddRemoveDedupVisitor<'_> {
         // The file extraction logic selects the appropriate indexes based on whether we found a valid path.
         // Remove getters are not included when visiting a non-log batch (checkpoint batch), so do
         // not try to extract remove actions in that case.
-        let Some((file_key, is_add)) =
-            self.deduplicator
-                .extract_file_action(i, getters, !self.deduplicator.is_log_batch())?
+        let Some((file_key, is_add)) = self.deduplicator.extract_file_action(
+            i,
+            getters,
+            !self.deduplicator.is_log_batch(), // skip_removes. true if this is a checkpoint batch
+        )?
         else {
             return Ok(false);
         };
@@ -231,11 +233,8 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
     }
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        let expected_getters = if self.deduplicator.is_log_batch() {
-            9
-        } else {
-            5
-        };
+        let is_log_batch = self.deduplicator.is_log_batch();
+        let expected_getters = if is_log_batch { 9 } else { 5 };
         require!(
             getters.len() == expected_getters,
             Error::InternalError(format!(
