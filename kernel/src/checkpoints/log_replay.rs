@@ -8,9 +8,8 @@ use crate::log_replay::{FileActionKey, HasSelectionVector, LogReplayProcessor};
 use crate::{DeltaResult, EngineData};
 
 pub struct CheckpointData {
-    #[allow(unused)]
-    data: Box<dyn EngineData>,
-    selection_vector: Vec<bool>,
+    pub data: Box<dyn EngineData>,
+    pub selection_vector: Vec<bool>,
 }
 
 impl HasSelectionVector for CheckpointData {
