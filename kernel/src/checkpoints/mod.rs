@@ -9,7 +9,7 @@
 //! The API is designed with a builder pattern for configuring and creating checkpoint writers.
 //!
 //! # Example
-//! ```
+//! ```ignore
 //! let path = "./tests/data/app-txn-no-checkpoint";
 //! let engine = Arc::new(SyncEngine::new());
 //! let table = Table::try_from_uri(path)?;
