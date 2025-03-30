@@ -352,13 +352,13 @@ impl From<&[u8]> for Scalar {
 
 impl From<u64> for Scalar {
     fn from(u: u64) -> Self {
-        Self::ULong(u.into())
+        Self::ULong(u)
     }
 }
 
 impl From<usize> for Scalar {
     fn from(u: usize) -> Self {
-        Self::USize(u.into())
+        Self::USize(u)
     }
 }
 

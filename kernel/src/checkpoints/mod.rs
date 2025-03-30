@@ -167,7 +167,6 @@ impl CheckpointWriter {
     /// Given the engine collected checkpoint metadata we want to extend
     /// the EngineData batch with the remaining fields for the `_last_checkpoint`
     /// file.
-
     pub fn finalize_checkpoint(
         self,
         engine: &dyn Engine,
@@ -229,7 +228,7 @@ impl CheckpointWriter {
         );
 
         // Transform the metadata
-        Ok(last_checkpoint_metadata_evaluator.evaluate(metadata)?)
+        last_checkpoint_metadata_evaluator.evaluate(metadata)
     }
 }
 

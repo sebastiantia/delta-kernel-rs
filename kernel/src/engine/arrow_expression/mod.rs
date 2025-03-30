@@ -1,6 +1,11 @@
 //! Expression handling based on arrow-rs compute kernels.
 use std::sync::Arc;
 
+#[cfg(target_pointer_width = "32")]
+use crate::arrow::array::UInt32Array;
+#[cfg(target_pointer_width = "64")]
+use crate::arrow::array::UInt64Array;
+
 use crate::arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array,
     Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, RecordBatch,
@@ -19,7 +24,6 @@ use crate::expressions::{Expression, Scalar};
 use crate::schema::{DataType, PrimitiveType, SchemaRef};
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
-use arrow_53::array::UInt64Array;
 use itertools::Itertools;
 use tracing::debug;
 
