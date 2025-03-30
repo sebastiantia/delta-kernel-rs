@@ -48,6 +48,8 @@ pub(crate) struct FileActionDeduplicator<'seen> {
     /// far in the log for deduplication. This is a mutable reference to the set
     /// of seen file keys that persists across multiple log batches.
     seen_file_keys: &'seen mut HashSet<FileActionKey>,
+    // TODO: Consider renaming to `is_commit_batch`, `deduplicate_batch`, or `save_batch`
+    // to better reflect its role in deduplication logic.
     /// Whether we're processing a log batch (as opposed to a checkpoint)
     is_log_batch: bool,
     /// Index of the getter containing the add.path column
@@ -109,7 +111,13 @@ impl<'seen> FileActionDeduplicator<'seen> {
         }
     }
 
-    /// Extract the deletion vector unique ID if it exists.
+    /// Extracts the deletion vector unique ID if it exists.
+    ///
+    /// This function retrieves the necessary fields for constructing a deletion vector unique ID
+    /// by accessing `getters` at `dv_start_index` and the following two indices. Specifically:
+    /// - `dv_start_index` retrieves the storage type (`deletionVector.storageType`).
+    /// - `dv_start_index + 1` retrieves the path or inline deletion vector (`deletionVector.pathOrInlineDv`).
+    /// - `dv_start_index + 2` retrieves the optional offset (`deletionVector.offset`).
     fn extract_dv_unique_id<'a>(
         &self,
         i: usize,
@@ -175,6 +183,9 @@ impl<'seen> FileActionDeduplicator<'seen> {
     }
 
     /// Returns whether we are currently processing a log batch.
+    ///
+    /// `true` indicates we are processing a batch from a commit file.
+    /// `false` indicates we are processing a batch from a checkpoint.
     pub(crate) fn is_log_batch(&self) -> bool {
         self.is_log_batch
     }
