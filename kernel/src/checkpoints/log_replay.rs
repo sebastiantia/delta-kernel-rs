@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use crate::actions::visitors::CheckpointVisitor;
@@ -27,10 +27,10 @@ struct CheckpointLogReplayProcessor {
     seen_file_keys: HashSet<FileActionKey>,
 
     /// Counter for the total number of actions processed during log replay.
-    total_actions: Arc<AtomicU64>,
+    total_actions: Arc<AtomicI64>,
 
     /// Counter for the total number of add actions processed during log replay.
-    total_add_actions: Arc<AtomicU64>,
+    total_add_actions: Arc<AtomicI64>,
 
     /// Indicates whether a protocol action has been seen in the log.
     seen_protocol: bool,
@@ -116,8 +116,8 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
 #[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
 impl CheckpointLogReplayProcessor {
     pub(super) fn new(
-        total_actions_counter: Arc<AtomicU64>,
-        total_add_actions_counter: Arc<AtomicU64>,
+        total_actions_counter: Arc<AtomicI64>,
+        total_add_actions_counter: Arc<AtomicI64>,
         minimum_file_retention_timestamp: i64,
     ) -> Self {
         Self {
@@ -143,8 +143,8 @@ impl CheckpointLogReplayProcessor {
 #[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
 pub(crate) fn checkpoint_actions_iter(
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send + 'static,
-    total_actions_counter: Arc<AtomicU64>,
-    total_add_actions_counter: Arc<AtomicU64>,
+    total_actions_counter: Arc<AtomicI64>,
+    total_add_actions_counter: Arc<AtomicI64>,
     minimum_file_retention_timestamp: i64,
 ) -> impl Iterator<Item = DeltaResult<CheckpointData>> + Send + 'static {
     let mut log_scanner = CheckpointLogReplayProcessor::new(
@@ -158,7 +158,7 @@ pub(crate) fn checkpoint_actions_iter(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
 
     use crate::arrow::array::StringArray;
@@ -172,8 +172,8 @@ mod tests {
     #[test]
     fn test_v1_checkpoint_actions_iter_multi_batch_integration() -> DeltaResult<()> {
         // Setup counters
-        let total_actions_counter = Arc::new(AtomicU64::new(0));
-        let total_add_actions_counter = Arc::new(AtomicU64::new(0));
+        let total_actions_counter = Arc::new(AtomicI64::new(0));
+        let total_add_actions_counter = Arc::new(AtomicI64::new(0));
 
         // Create first batch with protocol, metadata, and some files
         let json_strings1: StringArray = vec![

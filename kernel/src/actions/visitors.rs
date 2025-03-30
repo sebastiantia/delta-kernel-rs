@@ -504,15 +504,15 @@ pub(crate) struct CheckpointVisitor<'seen> {
     // File actions deduplication state
     pub(crate) deduplicator: FileActionDeduplicator<'seen>,
     pub(crate) selection_vector: Vec<bool>,
-    pub(crate) total_file_actions: u64,
-    pub(crate) total_add_actions: u64,
+    pub(crate) total_file_actions: i64,
+    pub(crate) total_add_actions: i64,
     pub(crate) minimum_file_retention_timestamp: i64,
 
     // Non-file actions deduplication state
     pub(crate) seen_protocol: bool,
     pub(crate) seen_metadata: bool,
     pub(crate) seen_txns: &'seen mut HashSet<String>,
-    pub(crate) total_non_file_actions: u64,
+    pub(crate) total_non_file_actions: i64,
 }
 
 #[allow(unused)]
