@@ -180,16 +180,20 @@ impl<'seen> FileActionDeduplicator<'seen> {
     }
 }
 
-/// Trait defining log replay processors which implement custom filtering and transformation
-/// logic for processing action batches from transaction logs. They receive batches in reverse
-/// chronological order (newest to oldest) and typically:
+/// Trait defining log replay processors.
 ///
-/// 1. Create or maintain a selection vector to track which actions to include
-/// 2. Track already-seen file actions to deduplicate across batches
-/// 3. Apply specialized filtering based on processor type (scan, checkpoint, etc.)
+/// Log replay processors filter and transform action batches from Delta transaction logs
+/// into specialized output types. Each processor maintains state as it processes batches
+/// in reverse chronological order (newest to oldest).
 ///
+/// Typical responsibilities include:
+///
+/// 1. Maintaining selection vectors to identify relevant actions in each batch
+/// 2. Tracking file actions that have already been processed to eliminate duplicates
+/// 3. Applying domain-specific filtering based on the processor's purpose (scan, checkpoint, etc.)
 pub(crate) trait LogReplayProcessor {
-    /// The type of results produced by this processor
+    /// The type of results produced by this processor must implement the
+    /// `HasSelectionVector` trait to allow filtering out batches with no selected rows.
     type Output: HasSelectionVector;
 
     /// Process a batch of actions and return the filtered result
@@ -237,7 +241,8 @@ pub(crate) trait LogReplayProcessor {
     }
 }
 
-/// Trait for types that contain a selection vector used in log replay filtering.
+/// This trait is used to determine if a processor's output contains any selected rows.
+/// This is used to filter out batches with no selected rows from the log replay results.
 pub(crate) trait HasSelectionVector {
     /// Check if the selection vector contains at least one selected row
     fn has_selected_rows(&self) -> bool;
