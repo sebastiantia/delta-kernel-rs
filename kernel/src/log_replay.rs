@@ -190,21 +190,32 @@ impl<'seen> FileActionDeduplicator<'seen> {
 ///
 pub(crate) trait LogReplayProcessor {
     /// The type of results produced by this processor
-    type Output;
+    type Output: HasSelectionVector;
 
     /// Process a batch of actions and return the filtered result
+    ///
+    /// # Arguments
+    /// * `batch` - Box containing the `EngineData` batch of actions to process
+    /// * `is_log_batch` - Flag indicating whether this batch comes from a commit file (`true`)
+    ///                    or a checkpoint file (`false`)
+    ///
+    /// Returns a `DeltaResult` containing the processor's output type with filtered actions
     fn process_actions_batch(
         &mut self,
         batch: Box<dyn EngineData>,
         is_log_batch: bool,
     ) -> DeltaResult<Self::Output>;
 
-    // Get a reference to the set of seen file keys
-    fn seen_file_keys(&mut self) -> &mut HashSet<FileActionKey>;
-
     /// Applies a processor to an action iterator and filters out empty results.
     ///
-    /// This is an associated function rather than an instance method because the
+    /// # Arguments
+    /// * `processor` - The processor implementation to apply
+    /// * `action_iter` - Iterator of action batches and their source flags
+    ///
+    /// Returns an iterator that yields processed results, filtering out batches
+    /// where no rows were selected
+    ///
+    /// Note: This is an associated function rather than an instance method because the
     /// returned iterator needs to own the processor.
     fn apply_to_iterator(
         processor: impl LogReplayProcessor<Output = Self::Output>,

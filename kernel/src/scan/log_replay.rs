@@ -339,7 +339,7 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
         let result = self.add_transform.evaluate(batch.as_ref())?;
 
         let mut visitor = AddRemoveDedupVisitor::new(
-            self.seen_file_keys(),
+            &mut self.seen_file_keys,
             selection_vector,
             logical_schema,
             transform,
@@ -353,10 +353,6 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
             visitor.selection_vector,
             visitor.row_transform_exprs,
         ))
-    }
-
-    fn seen_file_keys(&mut self) -> &mut HashSet<FileActionKey> {
-        &mut self.seen_file_keys
     }
 }
 
