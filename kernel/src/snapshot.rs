@@ -1,6 +1,7 @@
 //! In-memory representation of snapshots of tables (snapshot is a table at given point in time, it
 //! has schema etc.)
 
+use delta_kernel_derive::Schema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -97,7 +98,7 @@ impl Snapshot {
         self.table_configuration().version()
     }
 
-    /// Table [`Schema`] at this `Snapshot`s version.
+    /// Table [`type@Schema`] at this `Snapshot`s version.
     pub fn schema(&self) -> SchemaRef {
         self.table_configuration.schema()
     }
@@ -142,22 +143,22 @@ impl Snapshot {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Schema)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-struct CheckpointMetadata {
+struct LastCheckpointHint {
     /// The version of the table when the last checkpoint was made.
     #[allow(unreachable_pub)] // used by acceptance tests (TODO make an fn accessor?)
-    pub version: Version,
+    pub version: i64, // TODO: use Version type instead of i64
     /// The number of actions that are stored in the checkpoint.
     pub(crate) size: i64,
     /// The number of fragments if the last checkpoint was written in multiple parts.
-    pub(crate) parts: Option<usize>,
+    pub(crate) parts: Option<i64>, // TODO: use usize instead
     /// The number of bytes of the checkpoint.
-    pub(crate) size_in_bytes: Option<i64>,
+    pub(crate) size_in_bytes: Option<i64>, // TODO: use u64 instead
     /// The number of AddFile actions in the checkpoint.
-    pub(crate) num_of_add_files: Option<i64>,
+    pub(crate) num_of_add_files: Option<i64>, // TODO: use u64 instead
     /// The schema of the checkpoint file.
     pub(crate) checkpoint_schema: Option<Schema>,
     /// The checksum of the last checkpoint JSON.
@@ -175,7 +176,7 @@ struct CheckpointMetadata {
 fn read_last_checkpoint(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
-) -> DeltaResult<Option<CheckpointMetadata>> {
+) -> DeltaResult<Option<LastCheckpointHint>> {
     let file_path = log_root.join(LAST_CHECKPOINT_FILE_NAME)?;
     match fs_client
         .read_files(vec![(file_path, None)])
