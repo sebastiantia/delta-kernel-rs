@@ -131,7 +131,7 @@ impl LogSegment {
                 // Else, we check if the checkpoint hint's version is less than or equal to the
                 // time travel version.
                 (Some(cp), Some(end_version))
-                    if i64::try_from(end_version).map_or(false, |v| cp.version <= v) =>
+                    if i64::try_from(end_version).is_ok_and(|v| cp.version <= v) =>
                 {
                     list_log_files_with_checkpoint(&cp, fs_client, &log_root, Some(end_version))?
                 }

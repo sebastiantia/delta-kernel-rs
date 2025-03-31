@@ -98,7 +98,7 @@ impl Snapshot {
         self.table_configuration().version()
     }
 
-    /// Table [`Schema`] at this `Snapshot`s version.
+    /// Table [`type@Schema`] at this `Snapshot`s version.
     pub fn schema(&self) -> SchemaRef {
         self.table_configuration.schema()
     }
