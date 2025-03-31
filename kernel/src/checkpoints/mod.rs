@@ -35,9 +35,12 @@ use std::{
 };
 use url::Url;
 
-use crate::actions::schemas::GetStructField;
 use crate::expressions::column_expr;
 use crate::schema::{SchemaRef, StructType};
+use crate::{
+    actions::schemas::{GetStructField, ToSchema},
+    snapshot::LastCheckpointHint,
+};
 use crate::{
     actions::{
         Add, Metadata, Protocol, Remove, SetTransaction, Sidecar, ADD_NAME, METADATA_NAME,
@@ -45,29 +48,11 @@ use crate::{
     },
     path::ParsedLogPath,
     snapshot::Snapshot,
-    DeltaResult, Engine, EngineData, Error, Expression, Version,
+    DeltaResult, Engine, EngineData, Error, Expression,
 };
 pub mod log_replay;
 #[cfg(test)]
 mod tests;
-
-/// Schema definition for the _last_checkpoint file
-pub(crate) static CHECKPOINT_METADATA_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    Arc::new(StructType::new(vec![
-        <Version>::get_struct_field("version"),
-        <i64>::get_struct_field("size"),
-        Option::<usize>::get_struct_field("parts"),
-        Option::<i64>::get_struct_field("sizeInBytes"),
-        Option::<i64>::get_struct_field("numOfAddFiles"),
-        // Option::<Schema>::get_struct_field("checkpoint_schema"), TODO: Schema
-        // Option::<String>::get_struct_field("checksum"), TODO: Checksum
-    ]))
-});
-
-/// Get the expected schema for the _last_checkpoint file
-pub fn get_checkpoint_metadata_schema() -> &'static SchemaRef {
-    &CHECKPOINT_METADATA_SCHEMA
-}
 
 /// Read schema definition for collecting checkpoint actions
 static CHECKPOINT_READ_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
@@ -117,10 +102,10 @@ pub struct CheckpointWriter {
     total_add_actions_counter: Arc<AtomicI64>,
 
     /// Version of the checkpoint
-    version: Version,
+    version: i64,
 
     /// Number of parts of the checkpoint
-    parts: usize,
+    parts: i64,
 
     /// Path to table's log
     log_root: Url,
@@ -132,8 +117,8 @@ impl CheckpointWriter {
         single_file_checkpoint_data: Option<SingleFileCheckpointData>,
         total_actions_counter: Arc<AtomicI64>,
         total_add_actions_counter: Arc<AtomicI64>,
-        version: Version,
-        parts: usize,
+        version: i64,
+        parts: i64,
         log_root: Url,
     ) -> Self {
         Self {
@@ -205,7 +190,6 @@ impl CheckpointWriter {
                 metadata.len()
             )));
         }
-
         // Create expression for transforming the metadata
         let last_checkpoint_exprs = [
             Expression::literal(self.version),
@@ -214,11 +198,14 @@ impl CheckpointWriter {
             column_expr!("sizeInBytes"),
             Expression::literal(self.total_add_actions_counter.load(Ordering::SeqCst)),
         ];
+
         let last_checkpoint_expr = Expression::struct_from(last_checkpoint_exprs);
 
         // Get schemas for transformation
-        let last_checkpoint_schema = get_checkpoint_metadata_schema();
+        let last_checkpoint_schema = LastCheckpointHint::to_schema();
+        println!("last_checkpoint_schema: {:?}", last_checkpoint_schema);
         let engine_metadata_schema = last_checkpoint_schema.project_as_struct(&["sizeInBytes"])?;
+        println!("engine_metadata_schema: {:?}", engine_metadata_schema);
 
         // Create the evaluator for the transformation
         let last_checkpoint_metadata_evaluator = engine.get_expression_handler().get_evaluator(
@@ -318,7 +305,7 @@ impl CheckpointBuilder {
             Some(data),
             total_actions_counter,
             total_add_actions_counter,
-            self.snapshot.version(),
+            self.snapshot.version() as i64,
             1,
             self.snapshot.log_segment().log_root.clone(),
         ))
@@ -489,8 +476,8 @@ mod unit_tests {
     fn test_prepare_last_checkpoint_metadata() -> DeltaResult<()> {
         // Setup test data
         let size_in_bytes: i64 = 1024 * 1024; // 1MB
-        let version: Version = 10;
-        let parts: usize = 3;
+        let version = 10;
+        let parts = 3;
         let total_actions_counter = Arc::new(AtomicI64::new(100));
         let total_add_actions_counter = Arc::new(AtomicI64::new(75));
 
@@ -519,7 +506,7 @@ mod unit_tests {
         // Verify the values match our expectations
         assert_eq!(json["version"], version);
         assert_eq!(json["size"], total_actions_counter.load(Ordering::Relaxed));
-        assert_eq!(json["parts"], parts as i64);
+        assert_eq!(json["parts"], parts);
         assert_eq!(json["sizeInBytes"], size_in_bytes);
         assert_eq!(
             json["numOfAddFiles"],
@@ -532,8 +519,8 @@ mod unit_tests {
     #[test]
     fn test_prepare_last_checkpoint_metadata_with_empty_batch() {
         // Setup test data
-        let version: Version = 10;
-        let parts: usize = 3;
+        let version = 10;
+        let parts = 3;
         let total_actions_counter = Arc::new(AtomicI64::new(100));
         let total_add_actions_counter = Arc::new(AtomicI64::new(75));
 
@@ -581,8 +568,8 @@ mod unit_tests {
     #[test]
     fn test_prepare_last_checkpoint_metadata_with_multiple_rows() {
         // Setup test data
-        let version: Version = 10;
-        let parts: usize = 1;
+        let version = 10;
+        let parts = 1;
         let total_actions_counter = Arc::new(AtomicI64::new(50));
         let total_add_actions_counter = Arc::new(AtomicI64::new(30));
 

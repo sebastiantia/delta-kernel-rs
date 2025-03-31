@@ -96,10 +96,6 @@ pub enum Scalar {
     Integer(i32),
     /// 64bit integer
     Long(i64),
-    // unsigned 64bit integer
-    ULong(u64),
-    // usize
-    USize(usize),
     /// 16bit integer
     Short(i16),
     /// 8bit integer
@@ -135,8 +131,6 @@ impl Scalar {
         match self {
             Self::Integer(_) => DataType::INTEGER,
             Self::Long(_) => DataType::LONG,
-            Self::ULong(_) => DataType::ULONG,
-            Self::USize(_) => DataType::USIZE,
             Self::Short(_) => DataType::SHORT,
             Self::Byte(_) => DataType::BYTE,
             Self::Float(_) => DataType::FLOAT,
@@ -175,8 +169,6 @@ impl Display for Scalar {
         match self {
             Self::Integer(i) => write!(f, "{}", i),
             Self::Long(i) => write!(f, "{}", i),
-            Self::ULong(i) => write!(f, "{}", i),
-            Self::USize(i) => write!(f, "{}", i),
             Self::Short(i) => write!(f, "{}", i),
             Self::Byte(i) => write!(f, "{}", i),
             Self::Float(fl) => write!(f, "{}", fl),
@@ -249,10 +241,6 @@ impl PartialOrd for Scalar {
             (Integer(_), _) => None,
             (Long(a), Long(b)) => a.partial_cmp(b),
             (Long(_), _) => None,
-            (ULong(a), ULong(b)) => a.partial_cmp(b),
-            (ULong(_), _) => None,
-            (USize(a), USize(b)) => a.partial_cmp(b),
-            (USize(_), _) => None,
             (Short(a), Short(b)) => a.partial_cmp(b),
             (Short(_), _) => None,
             (Byte(a), Byte(b)) => a.partial_cmp(b),
@@ -350,18 +338,6 @@ impl From<&[u8]> for Scalar {
     }
 }
 
-impl From<u64> for Scalar {
-    fn from(u: u64) -> Self {
-        Self::ULong(u)
-    }
-}
-
-impl From<usize> for Scalar {
-    fn from(u: usize) -> Self {
-        Self::USize(u)
-    }
-}
-
 // TODO: add more From impls
 
 impl PrimitiveType {
@@ -402,8 +378,6 @@ impl PrimitiveType {
             Short => self.parse_str_as_scalar(raw, Scalar::Short),
             Integer => self.parse_str_as_scalar(raw, Scalar::Integer),
             Long => self.parse_str_as_scalar(raw, Scalar::Long),
-            ULong => self.parse_str_as_scalar(raw, Scalar::ULong),
-            USize => self.parse_str_as_scalar(raw, Scalar::USize),
             Float => self.parse_str_as_scalar(raw, Scalar::Float),
             Double => self.parse_str_as_scalar(raw, Scalar::Double),
             Boolean => {
