@@ -12,6 +12,7 @@ use crate::expressions::{column_expr, column_name, ColumnName, Expression, Expre
 use crate::log_replay::{FileActionDeduplicator, FileActionKey, LogReplayProcessor};
 use crate::predicates::{DefaultPredicateEvaluator, PredicateEvaluator as _};
 use crate::scan::{Scalar, TransformExpr};
+use crate::scan::{Scalar, TransformExpr};
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
 use crate::utils::require;
 use crate::{DeltaResult, Engine, EngineData, Error, ExpressionEvaluator};
