@@ -595,10 +595,15 @@ impl Sidecar {
 /// The CheckpointMetadata action describes details about a checkpoint following the V2 specification.
 ///
 /// [More info]: https://github.com/delta-io/delta/blob/master/PROTOCOL.md#checkpoint-metadata
-#[derive(Schema, Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct CheckpointMetadata {
     /// The version of the V2 spec checkpoint.
+    ///
+    /// Currently using `i64` for compatibility with other actions' representations.
+    /// Future work will address converting numeric fields to unsigned types (e.g., `u64`) where
+    /// semantically appropriate (e.g., for version, size, timestamps, etc.).
+    /// See issue #786 for tracking progress.
     pub(crate) version: i64,
 
     /// Map containing any additional metadata about the V2 spec checkpoint.
