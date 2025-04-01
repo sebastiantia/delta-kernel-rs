@@ -544,8 +544,10 @@ impl V1CheckpointVisitor<'_> {
         seen_file_keys: &'seen mut HashSet<FileActionKey>,
         is_log_batch: bool,
         selection_vector: Vec<bool>,
-        seen_txns: &'seen mut HashSet<String>,
         minimum_file_retention_timestamp: i64,
+        seen_protocol: bool,
+        seen_metadata: bool,
+        seen_txns: &'seen mut HashSet<String>,
     ) -> V1CheckpointVisitor<'seen> {
         V1CheckpointVisitor {
             deduplicator: FileActionDeduplicator::new(
@@ -561,8 +563,8 @@ impl V1CheckpointVisitor<'_> {
             total_add_actions: 0,
             minimum_file_retention_timestamp,
 
-            seen_protocol: false,
-            seen_metadata: false,
+            seen_protocol,
+            seen_metadata,
             seen_txns,
             total_non_file_actions: 0,
         }
@@ -1022,8 +1024,10 @@ mod tests {
             &mut seen_file_keys,
             true,
             vec![false; 8],
-            &mut seen_txns,
             0, // minimum_file_retention_timestamp (no expired tombstones)
+            false,
+            false,
+            &mut seen_txns,
         );
 
         visitor.visit_rows_of(data.as_ref())?;
@@ -1077,8 +1081,10 @@ mod tests {
             &mut seen_file_keys,
             true,
             vec![false; 4],
-            &mut seen_txns,
             100, // minimum_file_retention_timestamp (threshold set to 100)
+            false,
+            false,
+            &mut seen_txns,
         );
 
         visitor.visit_rows_of(batch.as_ref())?;
@@ -1104,8 +1110,15 @@ mod tests {
 
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
-        let mut visitor =
-            V1CheckpointVisitor::new(&mut seen_file_keys, true, vec![false; 2], &mut seen_txns, 0);
+        let mut visitor = V1CheckpointVisitor::new(
+            &mut seen_file_keys,
+            true,
+            vec![false; 2],
+            0,
+            false,
+            false,
+            &mut seen_txns,
+        );
 
         visitor.visit_rows_of(batch.as_ref())?;
 
@@ -1132,8 +1145,10 @@ mod tests {
             &mut seen_file_keys,
             false, // is_log_batch = false (checkpoint batch)
             vec![false; 1],
-            &mut seen_txns,
             0,
+            false,
+            false,
+            &mut seen_txns,
         );
 
         visitor.visit_rows_of(batch.as_ref())?;
@@ -1165,8 +1180,15 @@ mod tests {
 
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
-        let mut visitor =
-            V1CheckpointVisitor::new(&mut seen_file_keys, true, vec![false; 4], &mut seen_txns, 0);
+        let mut visitor = V1CheckpointVisitor::new(
+            &mut seen_file_keys,
+            true,
+            vec![false; 4],
+            0,
+            false,
+            false,
+            &mut seen_txns,
+        );
 
         visitor.visit_rows_of(batch.as_ref())?;
 
@@ -1198,13 +1220,11 @@ mod tests {
             &mut seen_file_keys,
             true,
             vec![false; 3],
-            &mut seen_txns, // Pre-populated transaction
             0,
+            true,           // The visior has already seen a protocol action
+            true,           // The visitor has already seen a metadata action
+            &mut seen_txns, // Pre-populated transaction
         );
-
-        // Mark these as already seen
-        visitor.seen_protocol = true;
-        visitor.seen_metadata = true;
 
         visitor.visit_rows_of(batch.as_ref())?;
 
@@ -1238,8 +1258,10 @@ mod tests {
             &mut seen_file_keys,
             true, // is_log_batch
             vec![false; 7],
-            &mut seen_txns,
             0, // minimum_file_retention_timestamp
+            false,
+            false,
+            &mut seen_txns,
         );
 
         visitor.visit_rows_of(batch.as_ref())?;
