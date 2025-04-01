@@ -362,6 +362,9 @@ impl ScanLogReplayProcessor {
 /// `(engine_data, selection_vec)`. Each row that is selected in the returned `engine_data` _must_
 /// be processed to complete the scan. Non-selected rows _must_ be ignored. The boolean flag
 /// indicates whether the record batch is a log or checkpoint batch.
+///
+/// Note: The iterator of (engine_data, bool) tuples 'action_iter' parameter must be sorted by the
+/// order of the actions in the log from most recent to least recent.
 pub(crate) fn scan_action_iter(
     engine: &dyn Engine,
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,

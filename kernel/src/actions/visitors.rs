@@ -510,16 +510,16 @@ impl RowVisitor for SidecarVisitor {
 pub(crate) struct V1CheckpointVisitor<'seen> {
     // File actions state
     deduplicator: FileActionDeduplicator<'seen>, // Used to deduplicate file actions
-    selection_vector: Vec<bool>,                 // Used to mark rows for selection
-    total_file_actions: i64,                     // i64 to match the `_last_checkpoint` file schema
-    total_add_actions: i64,                      // i64 to match the `_last_checkpoint` file schema
+    pub(crate) selection_vector: Vec<bool>,      // Used to mark rows for selection
+    pub(crate) total_file_actions: i64,          // i64 to match the `_last_checkpoint` file schema
+    pub(crate) total_add_actions: i64,           // i64 to match the `_last_checkpoint` file schema
     minimum_file_retention_timestamp: i64,       // i64 for comparison with remove.deletionTimestamp
 
     // Non-file actions state
-    seen_protocol: bool, // Used to keep only the first protocol action
-    seen_metadata: bool, // Used to keep only the first metadata action
+    pub(crate) seen_protocol: bool, // Used to keep only the first protocol action
+    pub(crate) seen_metadata: bool, // Used to keep only the first metadata action
     seen_txns: &'seen mut HashSet<String>, // Used to keep only the first txn action for each app ID
-    total_non_file_actions: i64, // i64 to match the `_last_checkpoint` file schema
+    pub(crate) total_non_file_actions: i64, // i64 to match the `_last_checkpoint` file schema
 }
 
 #[allow(unused)]
@@ -540,7 +540,7 @@ impl V1CheckpointVisitor<'_> {
     /// * `selection_vector` - Vector to mark rows for selection in the output
     /// * `seen_txns` - Set to track already seen transaction app IDs
     /// * `minimum_file_retention_timestamp` - Timestamp threshold for tombstone expiration
-    fn new<'seen>(
+    pub(crate) fn new<'seen>(
         seen_file_keys: &'seen mut HashSet<FileActionKey>,
         is_log_batch: bool,
         selection_vector: Vec<bool>,
@@ -765,24 +765,11 @@ pub(crate) fn visit_deletion_vector_at<'a>(
 
 #[cfg(test)]
 mod tests {
-    use crate::arrow::array::StringArray;
-    use crate::utils::test_utils::parse_json_batch;
     use crate::EngineData;
+    use crate::{arrow::array::StringArray, utils::test_utils::string_array_to_engine_data};
 
     use super::*;
-    use crate::{
-        actions::get_log_schema, engine::arrow_data::ArrowEngineData, engine::sync::SyncEngine,
-        Engine, EngineData,
-    };
-
-    // TODO(nick): Merge all copies of this into one "test utils" thing
-    fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData> {
-        let string_field = Arc::new(Field::new("a", DataType::Utf8, true));
-        let schema = Arc::new(ArrowSchema::new(vec![string_field]));
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(string_array)])
-            .expect("Can't convert to record batch");
-        Box::new(ArrowEngineData::new(batch))
-    }
+    use crate::{actions::get_log_schema, engine::sync::SyncEngine, Engine};
 
     fn action_batch() -> Box<dyn EngineData> {
         let json_strings: StringArray = vec![

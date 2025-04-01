@@ -1,46 +1,49 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use crate::actions::visitors::V1CheckpointVisitor;
 use crate::log_replay::{FileActionKey, HasSelectionVector, LogReplayProcessor};
-use crate::{DeltaResult, EngineData};
+use crate::{DeltaResult, EngineData, RowVisitor};
 
+/// `CheckpointData` is a wrapper struct that contains the engine data and selection vector
+/// for a batch of actions that have been processed during log replay.
+/// TODO: Use `FilteredEngineData` when implemented
 pub struct CheckpointData {
     #[allow(unused)]
     data: Box<dyn EngineData>,
     selection_vector: Vec<bool>,
 }
 
+/// Implement the `HasSelectionVector` trait for `CheckpointData` to allow checking
+/// whether the data contains selected rows.
 impl HasSelectionVector for CheckpointData {
     fn has_selected_rows(&self) -> bool {
         self.selection_vector.contains(&true)
     }
 }
 
-/// `CheckpointLogReplayProcessor` is responsible for filtering actions during log
-/// replay to include only those that should be included in a V1 checkpoint.
+/// The [`CheckpointLogReplayProcessor`] is an implementation of the [`LogReplayProcessor`] trait
+/// that filters log segment actions for inclusion in a V1 checkpoint file.
+///
+/// It processes each action batch via the `process_actions_batch` method, using the
+/// [`V1CheckpointVisitor`] to convert each batch into a [`CheckpointData`] instance that
+/// contains only the actions required for the checkpoint.
 #[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
 struct CheckpointLogReplayProcessor {
     /// Tracks file actions that have been seen during log replay to avoid duplicates.
     /// Contains (data file path, dv_unique_id) pairs as `FileActionKey` instances.
     seen_file_keys: HashSet<FileActionKey>,
-
     /// Counter for the total number of actions processed during log replay.
-    total_actions: Arc<AtomicU64>,
-
+    total_actions: Arc<AtomicI64>,
     /// Counter for the total number of add actions processed during log replay.
-    total_add_actions: Arc<AtomicU64>,
-
+    total_add_actions: Arc<AtomicI64>,
     /// Indicates whether a protocol action has been seen in the log.
     seen_protocol: bool,
-
     /// Indicates whether a metadata action has been seen in the log.
     seen_metadata: bool,
-
     /// Set of transaction app IDs that have been processed to avoid duplicates.
     seen_txns: HashSet<String>,
-
     /// Minimum timestamp for file retention, used for filtering expired tombstones.
     minimum_file_retention_timestamp: i64,
 }
@@ -81,10 +84,10 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
             &mut self.seen_file_keys,
             is_log_batch,
             selection_vector,
-            &mut self.seen_txns,
             self.minimum_file_retention_timestamp,
             self.seen_protocol,
             self.seen_metadata,
+            &mut self.seen_txns,
         );
 
         // Process actions and let visitor update selection vector
@@ -112,8 +115,8 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
 #[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
 impl CheckpointLogReplayProcessor {
     pub(super) fn new(
-        total_actions_counter: Arc<AtomicU64>,
-        total_add_actions_counter: Arc<AtomicU64>,
+        total_actions_counter: Arc<AtomicI64>,
+        total_add_actions_counter: Arc<AtomicI64>,
         minimum_file_retention_timestamp: i64,
     ) -> Self {
         Self {
@@ -131,16 +134,16 @@ impl CheckpointLogReplayProcessor {
 /// Given an iterator of (engine_data, bool) tuples, returns an iterator of
 /// `(engine_data, selection_vec)`. Each row that is selected in the returned `engine_data` _must_
 /// be written to the V1 checkpoint file in order to capture the table version's complete state.
-///  Non-selected rows _must_ be ignored. The boolean flag indicates whether the record batch
-///  is a log or checkpoint batch.
+/// Non-selected rows _must_ be ignored. The boolean flag indicates whether the record batch
+/// is a log or checkpoint batch.
 ///
-/// Note: The iterator of (engine_data, bool) tuples must be sorted by the order of the actions in
-/// the log from most recent to least recent.
+/// Note: The iterator of (engine_data, bool) tuples 'action_iter' parameter must be sorted by the
+/// order of the actions in the log from most recent to least recent.
 #[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
 pub(crate) fn checkpoint_actions_iter(
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send + 'static,
-    total_actions_counter: Arc<AtomicU64>,
-    total_add_actions_counter: Arc<AtomicU64>,
+    total_actions_counter: Arc<AtomicI64>,
+    total_add_actions_counter: Arc<AtomicI64>,
     minimum_file_retention_timestamp: i64,
 ) -> impl Iterator<Item = DeltaResult<CheckpointData>> + Send + 'static {
     let mut log_scanner = CheckpointLogReplayProcessor::new(
@@ -154,7 +157,7 @@ pub(crate) fn checkpoint_actions_iter(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
 
     use crate::arrow::array::StringArray;
@@ -166,10 +169,10 @@ mod tests {
     /// This tests the integration of the visitors with the main iterator function.
     /// More granular testing is performed in the individual visitor tests.
     #[test]
-    fn test_v1_checkpoint_actions_iter_multi_batch_integration() -> DeltaResult<()> {
+    fn test_v1_checkpoint_actions_iter_multi_batch_test() -> DeltaResult<()> {
         // Setup counters
-        let total_actions_counter = Arc::new(AtomicU64::new(0));
-        let total_add_actions_counter = Arc::new(AtomicU64::new(0));
+        let total_actions_counter = Arc::new(AtomicI64::new(0));
+        let total_add_actions_counter = Arc::new(AtomicI64::new(0));
 
         // Create first batch with protocol, metadata, and some files
         let json_strings1: StringArray = vec![
@@ -191,7 +194,8 @@ mod tests {
             r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#
         ].into();
 
-        // Create third batch with all duplicate actions (should be filtered out completely)
+        // Create third batch with all duplicate actions.
+        // The entire batch should be skippped as there are no selected actions to write from this batch.
         let json_strings3: StringArray = vec![
             r#"{"add":{"path":"file1","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,
             r#"{"add":{"path":"file2","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,
@@ -212,7 +216,7 @@ mod tests {
         )
         .collect::<Result<Vec<_>, _>>()?;
 
-        // Expect two batches in results (third batch should be filtered)"
+        // Expect two batches in results (third batch should be filtered out)"
         assert_eq!(results.len(), 2);
 
         // First batch should have all rows selected
@@ -229,7 +233,6 @@ mod tests {
             vec![false, false, true, false, true]
         );
 
-        // Verify counters
         // 6 total actions (4 from batch1 + 2 from batch2 + 0 from batch3)
         assert_eq!(total_actions_counter.load(Ordering::Relaxed), 6);
 
