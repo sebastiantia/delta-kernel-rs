@@ -16,6 +16,24 @@ use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructFie
 use crate::utils::require;
 use crate::{DeltaResult, Engine, EngineData, Error, ExpressionEvaluator};
 
+/// [`ScanLogReplayProcessor`] processes Delta log replay actions specifically for scanning file data.
+///
+/// During a table scan, the processor reads batches of log actions (in reverse chronological order)
+/// and performs the following steps:
+///
+/// - Data Skipping: Applies a predicate-based filter (via [`DataSkippingFilter`]) to quickly skip
+///   rows that are irrelevant for the query.
+/// - Partition Pruning: Uses an optional partition filter (extracted from a physical predicate)
+///   to exclude actions whose partition values do not meet the required criteria.
+/// - Action Deduplication: Leverages the [`FileActionDeduplicator`] to ensure that for each unique file
+///   (identified by its path and deletion vector unique ID), only the latest valid Add action is processed.
+/// - Transformation: Evaluates and applies any necessary transformations to convert physical log actions
+///   into a logical representation, as dictated by the table schema and optional transform logic.
+///
+/// As an implementation of [`LogReplayProcessor`], [`ScanLogReplayProcessor`] provides the `process_actions_batch`
+/// method, which applies these steps to each batch of log actions and produces a [`ScanData`] result. This result
+/// includes the transformed batch, a selection vector indicating which rows should be processed further, and any
+/// row-level transformation expressions that need to be applied to the selected rows.
 struct ScanLogReplayProcessor {
     partition_filter: Option<ExpressionRef>,
     data_skipping_filter: Option<DataSkippingFilter>,
@@ -335,8 +353,6 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
         let logical_schema = self.logical_schema.clone();
         let transform = self.transform.clone();
         let partition_filter = self.partition_filter.clone();
-        // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
-        let result = self.add_transform.evaluate(batch.as_ref())?;
 
         let mut visitor = AddRemoveDedupVisitor::new(
             &mut self.seen_file_keys,
@@ -346,8 +362,10 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
             partition_filter,
             is_log_batch,
         );
-
         visitor.visit_rows_of(batch.as_ref())?;
+
+        // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
+        let result = self.add_transform.evaluate(batch.as_ref())?;
         Ok((
             result,
             visitor.selection_vector,
