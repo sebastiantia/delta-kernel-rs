@@ -61,8 +61,9 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
     ///
     /// 1. Only the most recent protocol and metadata actions are included
     /// 2. For each app ID, only the most recent transaction action is included
-    /// 3. File actions are deduplicated based on path and unique ID
+    /// 3. Add and remove actions are deduplicated based on path and unique ID
     /// 4. Tombstones older than `minimum_file_retention_timestamp` are excluded
+    /// 5. Sidecar, commitInfo, and CDC actions are excluded
     fn process_actions_batch(
         &mut self,
         batch: Box<dyn EngineData>,
@@ -106,11 +107,6 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
             data: batch,
             selection_vector: visitor.selection_vector,
         })
-    }
-
-    // Get a reference to the set of seen file keys
-    fn seen_file_keys(&mut self) -> &mut HashSet<FileActionKey> {
-        &mut self.seen_file_keys
     }
 }
 
