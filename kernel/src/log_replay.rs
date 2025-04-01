@@ -48,6 +48,8 @@ pub(crate) struct FileActionDeduplicator<'seen> {
     /// far in the log for deduplication. This is a mutable reference to the set
     /// of seen file keys that persists across multiple log batches.
     seen_file_keys: &'seen mut HashSet<FileActionKey>,
+    // TODO: Consider renaming to `is_commit_batch`, `deduplicate_batch`, or `save_batch`
+    // to better reflect its role in deduplication logic.
     /// Whether we're processing a log batch (as opposed to a checkpoint)
     is_log_batch: bool,
     /// Index of the getter containing the add.path column
@@ -109,7 +111,13 @@ impl<'seen> FileActionDeduplicator<'seen> {
         }
     }
 
-    /// Extract the deletion vector unique ID if it exists.
+    /// Extracts the deletion vector unique ID if it exists.
+    ///
+    /// This function retrieves the necessary fields for constructing a deletion vector unique ID
+    /// by accessing `getters` at `dv_start_index` and the following two indices. Specifically:
+    /// - `dv_start_index` retrieves the storage type (`deletionVector.storageType`).
+    /// - `dv_start_index + 1` retrieves the path or inline deletion vector (`deletionVector.pathOrInlineDv`).
+    /// - `dv_start_index + 2` retrieves the optional offset (`deletionVector.offset`).
     fn extract_dv_unique_id<'a>(
         &self,
         i: usize,
@@ -175,36 +183,55 @@ impl<'seen> FileActionDeduplicator<'seen> {
     }
 
     /// Returns whether we are currently processing a log batch.
+    ///
+    /// `true` indicates we are processing a batch from a commit file.
+    /// `false` indicates we are processing a batch from a checkpoint.
     pub(crate) fn is_log_batch(&self) -> bool {
         self.is_log_batch
     }
 }
 
-/// Trait defining log replay processors which implement custom filtering and transformation
-/// logic for processing action batches from transaction logs. They receive batches in reverse
-/// chronological order (newest to oldest) and typically:
+/// A trait for processing batches of actions from Delta transaction logs during log replay.
 ///
-/// 1. Create or maintain a selection vector to track which actions to include
-/// 2. Track already-seen file actions to deduplicate across batches
-/// 3. Apply specialized filtering based on processor type (scan, checkpoint, etc.)
+/// Log replay processors scan transaction logs in **reverse chronological order** (newest to oldest),
+/// filtering and transforming action batches into specialized output types. These processors:
 ///
+/// - **Track and deduplicate file actions** to ensure only the latest relevant changes are kept.
+/// - **Maintain selection vectors** to indicate which actions in each batch should be included.
+/// - **Apply custom filtering logic** based on the processor’s purpose (e.g., checkpointing, scanning).
+///
+/// The `Output` type must implement [`HasSelectionVector`] to enable filtering of batches
+/// with no selected rows.
 pub(crate) trait LogReplayProcessor {
-    /// The type of results produced by this processor
-    type Output;
+    /// The type of results produced by this processor must implement the
+    /// `HasSelectionVector` trait to allow filtering out batches with no selected rows.
+    type Output: HasSelectionVector;
 
-    /// Process a batch of actions and return the filtered result
+    /// Processes a batch of actions and returns the filtered results.
+    ///
+    /// # Arguments
+    /// - `batch` - A boxed [`EngineData`] instance representing a batch of actions.
+    /// - `is_log_batch` - `true` if the batch originates from a commit log, `false` if from a checkpoint.
+    ///
+    /// Returns a [`DeltaResult`] containing the processor’s output, which includes only selected actions.
+    ///
+    /// Note: Since log replay is stateful, processing may update internal processor state (e.g., deduplication sets).
     fn process_actions_batch(
         &mut self,
         batch: Box<dyn EngineData>,
         is_log_batch: bool,
     ) -> DeltaResult<Self::Output>;
 
-    // Get a reference to the set of seen file keys
-    fn seen_file_keys(&mut self) -> &mut HashSet<FileActionKey>;
-
     /// Applies a processor to an action iterator and filters out empty results.
     ///
-    /// This is an associated function rather than an instance method because the
+    /// # Arguments
+    /// * `processor` - The processor implementation to apply
+    /// * `action_iter` - Iterator of action batches and their source flags
+    ///
+    /// Returns an iterator that yields processed results, filtering out batches
+    /// where no rows were selected
+    ///
+    /// Note: This is an associated function rather than an instance method because the
     /// returned iterator needs to own the processor.
     fn apply_to_iterator(
         processor: impl LogReplayProcessor<Output = Self::Output>,
@@ -226,7 +253,8 @@ pub(crate) trait LogReplayProcessor {
     }
 }
 
-/// Trait for types that contain a selection vector used in log replay filtering.
+/// This trait is used to determine if a processor's output contains any selected rows.
+/// This is used to filter out batches with no selected rows from the log replay results.
 pub(crate) trait HasSelectionVector {
     /// Check if the selection vector contains at least one selected row
     fn has_selected_rows(&self) -> bool;
