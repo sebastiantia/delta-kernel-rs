@@ -35,12 +35,12 @@ use std::{
 };
 use url::Url;
 
-use crate::expressions::column_expr;
-use crate::schema::{SchemaRef, StructType};
 use crate::{
     actions::schemas::{GetStructField, ToSchema},
+    expressions::Scalar,
     snapshot::LastCheckpointHint,
 };
+use crate::{actions::CheckpointMetadata, expressions::column_expr};
 use crate::{
     actions::{
         Add, Metadata, Protocol, Remove, SetTransaction, Sidecar, ADD_NAME, METADATA_NAME,
@@ -49,6 +49,10 @@ use crate::{
     path::ParsedLogPath,
     snapshot::Snapshot,
     DeltaResult, Engine, EngineData, Error, Expression,
+};
+use crate::{
+    schema::{SchemaRef, StructType},
+    ExpressionHandlerExtension,
 };
 pub mod log_replay;
 #[cfg(test)]
@@ -282,6 +286,13 @@ impl CheckpointBuilder {
             deleted_file_retention_timestamp,
         );
 
+        // Chain the result of create_checkpoint_metadata_batch to the checkpoint data
+        let chained = checkpoint_data.chain(create_checkpoint_metadata_batch(
+            self.snapshot.version() as i64,
+            engine,
+            v2_checkpoints_supported,
+        )?);
+
         // Generate checkpoint path based on builder configuration
         // Classic naming is required for V1 checkpoints and optional for V2 checkpoints
         let checkpoint_path = if self.with_classic_naming || !v2_checkpoints_supported {
@@ -296,13 +307,11 @@ impl CheckpointBuilder {
             )?
         };
 
-        let data = SingleFileCheckpointData {
-            data: Box::new(checkpoint_data),
-            path: checkpoint_path.location,
-        };
-
         Ok(CheckpointWriter::new(
-            Some(data),
+            Some(SingleFileCheckpointData {
+                data: Box::new(chained),
+                path: checkpoint_path.location,
+            }),
             total_actions_counter,
             total_add_actions_counter,
             self.snapshot.version() as i64,
@@ -376,6 +385,37 @@ fn deleted_file_retention_timestamp_with_time(
 
     // Simple subtraction - will produce negative values if retention > now
     Ok(now_ms - retention_ms)
+}
+
+/// Create a batch with a single row containing the [`CheckpointMetadata`] action
+/// for the V2 spec checkpoint.
+///
+/// This method calls the create_one method on the expression handler to create
+/// a single-row batch with the checkpoint metadata action. The method returns:
+/// - None if the checkpoint is not a V2 checkpoint
+/// - Some(Ok(batch)) if the batch was successfully created
+fn create_checkpoint_metadata_batch(
+    version: i64,
+    engine: &dyn Engine,
+    is_v2_checkpoint: bool,
+) -> DeltaResult<Option<DeltaResult<CheckpointData>>> {
+    if is_v2_checkpoint {
+        let values: &[Scalar] = &[version.into()];
+        let checkpoint_metadata_batch = engine.get_expression_handler().create_one(
+            // TODO: Include checkpointMetadata.tags when maps are supported
+            Arc::new(CheckpointMetadata::to_schema().project_as_struct(&["version"])?),
+            &values,
+        )?;
+
+        let result = CheckpointData {
+            data: checkpoint_metadata_batch,
+            selection_vector: vec![true],
+        };
+
+        Ok(Some(Ok(result)))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -613,5 +653,33 @@ mod unit_tests {
             }
             _ => panic!("Should have failed with error"),
         }
+    }
+
+    #[test]
+    fn test_create_checkpoint_metadata() -> DeltaResult<()> {
+        let engine = ExprEngine::new();
+        let version = 10;
+        let is_v2_checkpoint = true;
+
+        // Call the method under test
+        let result = create_checkpoint_metadata_batch(version, &engine, is_v2_checkpoint)?;
+
+        assert!(result.is_some());
+        let checkpoint_data = result.unwrap()?;
+        assert!(checkpoint_data.selection_vector == vec![true]);
+
+        // Extract the batch and verify the version field
+        let arrow_data = ArrowEngineData::try_from_engine_data(checkpoint_data.data)?;
+        assert!(arrow_data.len() == 1);
+
+        // Verify the version field
+        let version_field = arrow_data
+            .record_batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("Failed to downcast to Int64Array");
+        assert_eq!(version_field.value(0), version);
+        Ok(())
     }
 }

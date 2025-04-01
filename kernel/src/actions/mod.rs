@@ -544,6 +544,19 @@ pub(crate) struct SetTransaction {
     pub(crate) last_updated: Option<i64>,
 }
 
+/// The CheckpointMetadata action describes details about a checkpoint following the V2 specification.
+///
+/// [More info]: https://github.com/delta-io/delta/blob/master/PROTOCOL.md#checkpoint-metadata
+#[derive(Schema, Debug, PartialEq)]
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+pub(crate) struct CheckpointMetadata {
+    /// The version of the V2 spec checkpoint.
+    pub(crate) version: i64,
+
+    /// Map containing any additional metadata about the V2 spec checkpoint.
+    pub(crate) tags: Option<HashMap<String, String>>,
+}
+
 /// The sidecar action references a sidecar file which provides some of the checkpoint's
 /// file actions. This action is only allowed in checkpoints following the V2 spec.
 ///
