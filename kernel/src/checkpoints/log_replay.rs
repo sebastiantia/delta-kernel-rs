@@ -2,8 +2,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::actions::visitors::CheckpointVisitor;
-use crate::engine_data::RowVisitor;
+use crate::actions::visitors::V1CheckpointVisitor;
 use crate::log_replay::{FileActionKey, HasSelectionVector, LogReplayProcessor};
 use crate::{DeltaResult, EngineData};
 
@@ -78,14 +77,14 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
         );
 
         // Create the checkpoint visitor to process actions and update selection vector
-        let mut visitor = CheckpointVisitor::new(
+        let mut visitor = V1CheckpointVisitor::new(
             &mut self.seen_file_keys,
-            selection_vector,
             is_log_batch,
+            selection_vector,
+            &mut self.seen_txns,
             self.minimum_file_retention_timestamp,
             self.seen_protocol,
             self.seen_metadata,
-            &mut self.seen_txns,
         );
 
         // Process actions and let visitor update selection vector
