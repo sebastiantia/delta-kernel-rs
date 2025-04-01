@@ -191,30 +191,31 @@ impl<'seen> FileActionDeduplicator<'seen> {
     }
 }
 
-/// Trait defining log replay processors.
+/// A trait for processing batches of actions from Delta transaction logs during log replay.
 ///
-/// Log replay processors filter and transform action batches from Delta transaction logs
-/// into specialized output types. Each processor maintains state as it processes batches
-/// in reverse chronological order (newest to oldest).
+/// Log replay processors scan transaction logs in **reverse chronological order** (newest to oldest),
+/// filtering and transforming action batches into specialized output types. These processors:
 ///
-/// Typical responsibilities include:
+/// - **Track and deduplicate file actions** to ensure only the latest relevant changes are kept.
+/// - **Maintain selection vectors** to indicate which actions in each batch should be included.
+/// - **Apply custom filtering logic** based on the processor’s purpose (e.g., checkpointing, scanning).
 ///
-/// 1. Maintaining selection vectors to identify relevant actions in each batch
-/// 2. Tracking file actions that have already been processed to eliminate duplicates
-/// 3. Applying domain-specific filtering based on the processor's purpose (scan, checkpoint, etc.)
+/// The `Output` type must implement [`HasSelectionVector`] to enable filtering of batches
+/// with no selected rows.
 pub(crate) trait LogReplayProcessor {
     /// The type of results produced by this processor must implement the
     /// `HasSelectionVector` trait to allow filtering out batches with no selected rows.
     type Output: HasSelectionVector;
 
-    /// Process a batch of actions and return the filtered result
+    /// Processes a batch of actions and returns the filtered results.
     ///
     /// # Arguments
-    /// * `batch` - Box containing the `EngineData` batch of actions to process
-    /// * `is_log_batch` - Flag indicating whether this batch comes from a commit file (`true`)
-    ///                    or a checkpoint file (`false`)
+    /// - `batch` - A boxed [`EngineData`] instance representing a batch of actions.
+    /// - `is_log_batch` - `true` if the batch originates from a commit log, `false` if from a checkpoint.
     ///
-    /// Returns a `DeltaResult` containing the processor's output type with filtered actions
+    /// Returns a [`DeltaResult`] containing the processor’s output, which includes only selected actions.
+    ///
+    /// Note: Since log replay is stateful, processing may update internal processor state (e.g., deduplication sets).
     fn process_actions_batch(
         &mut self,
         batch: Box<dyn EngineData>,
