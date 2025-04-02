@@ -17,11 +17,12 @@
 //!
 //! The API is designed using a builder pattern:
 //!
-//! 1. [`CheckpointBuilder`] performs table feature detection and configuration validation
-//! 2. [`CheckpointWriter`] is constructed from the builder and handles:
+//! 1. [`CheckpointBuilder`] performs table feature detection and constructs the writer by:
+//!    - Configuring the writer with classic naming (optional)
 //!    - Replaying Delta log actions to filter, deduplicate, and select actions
-//!    - Writing consolidated checkpoint data to a single file
-//!    - Finalizing the checkpoint by generating a `_last_checkpoint` file with metadata//!
+//! 2. [`CheckpointWriter`] is constructed from the builder and handles:
+//!    - Returning consolidated checkpoint data for writing to the engine
+//!    - Finalizing the checkpoint by generating a `_last_checkpoint` file with metadata
 //!
 //! ## Example
 //!
