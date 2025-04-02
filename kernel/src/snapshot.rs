@@ -142,6 +142,7 @@ impl Snapshot {
     }
 }
 
+// Note: Schema can not be derived because the checkpoint schema is only known at runtime.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
