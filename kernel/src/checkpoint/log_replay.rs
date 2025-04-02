@@ -77,14 +77,6 @@ impl V1CheckpointVisitor<'_> {
     const REMOVE_PATH_INDEX: usize = 4; // Position of "remove.path" in getters
     const REMOVE_DV_START_INDEX: usize = 6; // Start position of remove deletion vector columns
 
-    /// Creates a new V1CheckpointVisitor for filtering checkpoint actions.
-    ///
-    /// # Arguments
-    /// * `seen_file_keys` - Set to track already seen file keys for deduplication
-    /// * `is_log_batch` - True if processing a batch from a commit file, false if from a checkpoint file
-    /// * `selection_vector` - Vector to mark rows for selection in the output
-    /// * `seen_txns` - Set to track already seen transaction app IDs
-    /// * `minimum_file_retention_timestamp` - Timestamp threshold for tombstone expiration
     pub(crate) fn new<'seen>(
         seen_file_keys: &'seen mut HashSet<FileActionKey>,
         is_log_batch: bool,
