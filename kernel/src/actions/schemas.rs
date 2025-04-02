@@ -8,15 +8,6 @@ pub(crate) trait ToSchema {
     fn to_schema() -> StructType;
 }
 
-/// Implement ToSchema for StructType to enable its use within Option<T> fields
-/// in schema-derived structs. This follows the system pattern where schema types
-/// implement ToSchema rather than directly implementing ToDataType.
-impl ToSchema for StructType {
-    fn to_schema() -> StructType {
-        StructType::new(vec![])
-    }
-}
-
 pub(crate) trait ToDataType {
     fn to_data_type() -> DataType;
 }

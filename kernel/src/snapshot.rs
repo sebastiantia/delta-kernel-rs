@@ -1,7 +1,6 @@
 //! In-memory representation of snapshots of tables (snapshot is a table at given point in time, it
 //! has schema etc.)
 
-use delta_kernel_derive::Schema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -143,18 +142,18 @@ impl Snapshot {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Schema)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 struct LastCheckpointHint {
     /// The version of the table when the last checkpoint was made.
     #[allow(unreachable_pub)] // used by acceptance tests (TODO make an fn accessor?)
-    pub version: i64, // TODO: use Version type instead of i64
+    pub version: Version,
     /// The number of actions that are stored in the checkpoint.
     pub(crate) size: i64,
     /// The number of fragments if the last checkpoint was written in multiple parts.
-    pub(crate) parts: Option<i64>, // TODO: use usize instead
+    pub(crate) parts: Option<usize>,
     /// The number of bytes of the checkpoint.
     pub(crate) size_in_bytes: Option<i64>, // TODO: use u64 instead
     /// The number of AddFile actions in the checkpoint.

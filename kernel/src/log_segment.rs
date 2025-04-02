@@ -127,12 +127,7 @@ impl LogSegment {
                 (Some(cp), None) => {
                     list_log_files_with_checkpoint(&cp, fs_client, &log_root, None)?
                 }
-                // If type conversion fails, we skip the checkpoint hint and list all log files.
-                // Else, we check if the checkpoint hint's version is less than or equal to the
-                // time travel version.
-                (Some(cp), Some(end_version))
-                    if i64::try_from(end_version).is_ok_and(|v| cp.version <= v) =>
-                {
+                (Some(cp), Some(end_version)) if cp.version <= end_version => {
                     list_log_files_with_checkpoint(&cp, fs_client, &log_root, Some(end_version))?
                 }
                 _ => list_log_files_with_version(fs_client, &log_root, None, time_travel_version)?,
@@ -545,21 +540,10 @@ fn list_log_files_with_checkpoint(
     log_root: &Url,
     end_version: Option<Version>,
 ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
-    // Safely convert checkpoint_metadata.version (i64) to u64 for comparisons
-    let checkpoint_metadata_version = match u64::try_from(checkpoint_metadata.version) {
-        Ok(version) => version,
-        Err(e) => {
-            return Err(Error::InvalidCheckpoint(format!(
-                "Invalid checkpoint version (negative value): {}",
-                e
-            )));
-        }
-    };
-
     let (commit_files, checkpoint_parts) = list_log_files_with_version(
         fs_client,
         log_root,
-        Some(checkpoint_metadata_version),
+        Some(checkpoint_metadata.version),
         end_version,
     )?;
 
@@ -569,31 +553,18 @@ fn list_log_files_with_checkpoint(
             "Had a _last_checkpoint hint but didn't find any checkpoints",
         ));
     };
-    if latest_checkpoint.version != checkpoint_metadata_version {
+    if latest_checkpoint.version != checkpoint_metadata.version {
         warn!(
             "_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}",
             checkpoint_metadata.version,
             latest_checkpoint.version
         );
-    } else {
-        // Convert checkpoint_metadata.parts(i64) to usize for comparisons
-        let expected_parts = match usize::try_from(checkpoint_metadata.parts.unwrap_or(1)) {
-            Ok(parts) => parts,
-            Err(e) => {
-                return Err(Error::InvalidCheckpoint(format!(
-                    "Invalid number of checkpoint parts (negative or too large): {}",
-                    e
-                )));
-            }
-        };
-
-        if checkpoint_parts.len() != expected_parts {
-            return Err(Error::InvalidCheckpoint(format!(
-                "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
-                expected_parts,
-                checkpoint_parts.len()
-            )));
-        }
+    } else if checkpoint_parts.len() != checkpoint_metadata.parts.unwrap_or(1) {
+        return Err(Error::InvalidCheckpoint(format!(
+            "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
+            checkpoint_metadata.parts.unwrap_or(1),
+            checkpoint_parts.len()
+        )));
     }
     Ok((commit_files, checkpoint_parts))
 }
