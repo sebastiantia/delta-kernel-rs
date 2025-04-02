@@ -295,6 +295,7 @@ impl ArrowEngineData {
 #[cfg(test)]
 mod tests {
     use crate::arrow::array::StringArray;
+
     use crate::utils::test_utils::string_array_to_engine_data;
     use crate::{
         actions::{get_log_schema, Metadata, Protocol},
