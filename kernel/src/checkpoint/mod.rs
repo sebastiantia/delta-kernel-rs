@@ -2,7 +2,9 @@
 //!
 //! This module implements the API for writing single-file checkpoints in Delta tables.
 //! Checkpoints provide a compact summary of the table state, enabling faster recovery by
-//! avoiding full log replay. This API supports multiple checkpoint types:
+//! avoiding full log replay.
+//!
+//! ## Checkpoint Types
 //!
 //! 1. **Single-file Classic-named V1 Checkpoint** – for legacy tables that do not support
 //!    the v2Checkpoints feature.
@@ -11,15 +13,15 @@
 //! 3. **Single-file UUID-named V2 Checkpoint** – the recommended option for small to medium
 //!    tables with v2Checkpoints support.
 //!
-//! TODO!(seb): API WIP
-//! The API is designed using a builder pattern via the `CheckpointBuilder`, which performs
-//! table feature detection and configuration validation before constructing a `CheckpointWriter`.
+//! ## Architecture
 //!
-//! The `CheckpointWriter` then orchestrates the process of:
-//! - Replaying Delta log actions (via the `checkpoint/log_replay.rs` module) to filter, deduplicate,
-//!   and select the actions that represent the table's current state.
-//! - Writing the consolidated checkpoint data to a single file.
-//! - Finalizing the checkpoint by generating a `_last_checkpoint` file with metadata.
+//! The API is designed using a builder pattern:
+//!
+//! 1. [`CheckpointBuilder`] performs table feature detection and configuration validation
+//! 2. [`CheckpointWriter`] is constructed from the builder and handles:
+//!    - Replaying Delta log actions to filter, deduplicate, and select actions
+//!    - Writing consolidated checkpoint data to a single file
+//!    - Finalizing the checkpoint by generating a `_last_checkpoint` file with metadata//!
 //!
 //! ## Example
 //!
@@ -40,7 +42,11 @@
 //! // Retrieve checkpoint data (ensuring single consumption)
 //! let checkpoint_data = writer.get_checkpoint_info()?;
 //!
-//! // Write checkpoint data to file and collect metadata before finalizing
+//! /* Write checkpoint data to file and collect metadata about the write */
+//! /* The implementation of the write is storage-specific and not shown */
+//! /* IMPORTANT: All data must be written before finalizing the checkpoint */
+//!
+//! // Finalize the checkpoint by writing the _last_checkpoint file
 //! writer.finalize_checkpoint(&engine, &checkpoint_metadata)?;
 //! ```
 //!
@@ -68,7 +74,8 @@ use crate::{
 
 pub(crate) mod log_replay;
 
-/// Read schema definition for collecting checkpoint actions
+/// This schema contains all the actions that we care to extract from the log
+/// files for the purpose of creating a checkpoint.
 static CHECKPOINT_READ_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     StructType::new([
         Option::<Add>::get_struct_field(ADD_NAME),
@@ -81,7 +88,8 @@ static CHECKPOINT_READ_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     .into()
 });
 
-/// Returns the read schema to collect checkpoint actions
+/// This schema is used when reading actions from the Delta log
+/// to ensure we capture all necessary action types.
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 fn get_checkpoint_read_schema() -> &'static SchemaRef {
@@ -164,11 +172,11 @@ impl CheckpointWriter {
     /// Finalizes the checkpoint writing process
     ///
     /// This method should be only called AFTER writing all checkpoint data to
-    /// ensure proper completion of the checkpoint operation, which includes
-    /// writing the _last_checkpoint file.
+    /// ensure proper completion of the checkpoint operation. This method
+    /// generates the `_last_checkpoint` file with metadata about the checkpoint.
     ///
-    /// Metadata is a single-row EngineData batch with {size_in_bytes: i64}
-    /// Given the engine collected checkpoint metadata we want to extend
+    /// The metadata parameter is a single-row EngineData batch containing
+    /// {size_in_bytes: i64} for the checkpoint file. This method will extend
     /// the EngineData batch with the remaining fields for the `_last_checkpoint`
     /// file.
     #[allow(dead_code)] // TODO: Remove when finalize_checkpoint is implemented
@@ -195,7 +203,6 @@ pub struct CheckpointBuilder {
 }
 
 impl CheckpointBuilder {
-    #[allow(dead_code)] // TODO: Remove when table.checkpoint is implemented
     pub(crate) fn new(snapshot: Snapshot) -> Self {
         Self {
             snapshot,
@@ -206,25 +213,18 @@ impl CheckpointBuilder {
     /// Configures the builder to use the classic naming scheme
     ///
     /// Classic naming is required for V1 checkpoints and optional for V2 checkpoints.
-    /// For V1 checkpoints, this method is a no-op.
-    /// For V2 checkpoints, the default is UUID naming unless this method is called.
+    /// - For V1 checkpoints, this method is a no-op.
+    /// - For V2 checkpoints, the default is UUID naming unless this method is called.
     pub fn with_classic_naming(mut self, with_classic_naming: bool) -> Self {
         self.with_classic_naming = with_classic_naming;
         self
     }
 
-    /// Builds a CheckpointWriter based on the configuration
+    /// Builds a [`CheckpointWriter`] based on the builder configuration.
     ///
     /// This method validates the configuration against table features and creates
-    /// a CheckpointWriter for the appropriate checkpoint type. It performs protocol
+    /// a [`CheckpointWriter`] for the appropriate checkpoint type. It performs protocol
     /// table feature checks to determine if v2Checkpoints are supported.
-    ///
-    /// # Arguments
-    /// * `engine` - The engine implementation for data operations
-    ///
-    /// # Returns
-    /// * `DeltaResult<CheckpointWriter>` - A configured checkpoint writer on success,
-    ///   or an error if the configuration is incompatible with table features
     pub fn build(self, engine: &dyn Engine) -> DeltaResult<CheckpointWriter> {
         let v2_checkpoints_supported = self
             .snapshot
