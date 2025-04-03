@@ -342,12 +342,11 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
         batch: Box<dyn EngineData>,
         is_log_batch: bool,
     ) -> DeltaResult<Self::Output> {
-        // Apply data skipping to get back a selection vector for actions that passed skipping. We
-        // will update the vector below as log replay identifies duplicates that should be ignored.
-        let selection_vector = match &self.data_skipping_filter {
-            Some(filter) => filter.apply(batch.as_ref())?,
-            None => vec![true; batch.len()],
-        };
+        // Build an initial selection vector for the batch which has had the data skipping filter
+        // applied. The selection vector is further updated by the deduplication visitor to remove
+        // rows that are not valid adds.
+        let selection_vector = self.build_selection_vector(batch.as_ref())?;
+
         assert_eq!(selection_vector.len(), batch.len());
 
         let logical_schema = self.logical_schema.clone();
@@ -372,6 +371,10 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
             visitor.row_transform_exprs,
         ))
     }
+
+    fn get_data_skipping_filter(&self) -> Option<&DataSkippingFilter> {
+        self.data_skipping_filter.as_ref()
+    }
 }
 
 /// Given an iterator of (engine_data, bool) tuples and a predicate, returns an iterator of
@@ -388,7 +391,7 @@ pub(crate) fn scan_action_iter(
     let log_scanner =
         ScanLogReplayProcessor::new(engine, physical_predicate, logical_schema, transform);
 
-    ScanLogReplayProcessor::apply_to_iterator(log_scanner, action_iter)
+    log_scanner.process_batches(action_iter)
 }
 
 #[cfg(test)]
