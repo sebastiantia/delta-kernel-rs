@@ -236,17 +236,12 @@ pub(crate) trait LogReplayProcessor: Sized {
         is_log_batch: bool,
     ) -> DeltaResult<Self::Output>;
 
-    /// Applies a processor to an action iterator and filters out empty results.
+    /// Applies the processor to an actions iterator and filters out empty results.
     ///
     /// # Arguments
-    /// * `processor` - The processor implementation to apply
     /// * `action_iter` - Iterator of action batches and their source flags
     ///
-    /// Returns an iterator that yields processed results, filtering out batches
-    /// where no rows were selected
-    ///
-    /// Note: This is an associated function rather than an instance method because the
-    /// returned iterator needs to own the processor.
+    /// Returns an iterator that yields the Output type of the processor.
     fn process_batches(
         mut self,
         action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
