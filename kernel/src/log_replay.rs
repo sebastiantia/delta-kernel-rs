@@ -207,7 +207,7 @@ impl<'seen> FileActionDeduplicator<'seen> {
 /// Implementations:
 /// - `ScanLogReplayProcessor`: Used for table scans, this processor filters and selects deduplicated  
 ///   `Add` actions from log batches to reconstruct the view of the table at a specific point in time.
-///    Note that scans do not expose `Remove` actions.
+///   Note that scans do not expose `Remove` actions.
 /// - `V1CheckpointLogReplayProcessor`(WIP): Will be responsible for processing log batches to construct  
 ///   V1 spec checkpoint files. Unlike scans, checkpoint processing includes additional actions,  
 ///   such as `Remove`, `Metadata`, and `Protocol`, required to fully reconstruct table state.
@@ -286,7 +286,7 @@ pub(crate) trait LogReplayProcessor: Sized {
 
     /// Returns an optional reference to the [`DataSkippingFilter`] used to filter rows
     /// when building the initial selection vector in `build_selection_vector`.
-    /// If `None` is returned, all rows are selected.
+    /// If `None` is returned, no filter is applied, and all rows are selected.
     fn get_data_skipping_filter(&self) -> Option<&DataSkippingFilter>;
 }
 
