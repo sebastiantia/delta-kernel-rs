@@ -191,8 +191,8 @@ impl V1CheckpointVisitor<'_> {
         i: usize,
         getter: &'a dyn GetData<'a>,
     ) -> Option<DeltaResult<()>> {
-        // Check for protocol field
-        let min_reader_version = match getter.get_int(i, "protocol.minReaderVersion") {
+        // minReaderVersion is a required field, so we check for its presence to determine if this is a protocol action.
+        match getter.get_int(i, "protocol.minReaderVersion") {
             Err(e) => return Some(Err(e)),
             Ok(None) => return None, // Not a protocol action
             Ok(Some(_)) => (),       // It is a protocol action
@@ -218,7 +218,7 @@ impl V1CheckpointVisitor<'_> {
         i: usize,
         getter: &'a dyn GetData<'a>,
     ) -> Option<DeltaResult<()>> {
-        // Check for metadata field
+        // id is a required field, so we check for its presence to determine if this is a metadata action.
         match getter.get_str(i, "metaData.id") {
             Err(e) => return Some(Err(e)),
             Ok(None) => return None, // Not a metadata action
