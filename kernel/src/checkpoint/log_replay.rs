@@ -142,21 +142,11 @@ impl V1CheckpointVisitor<'_> {
         i: usize,
         getters: &[&'a dyn GetData<'a>],
     ) -> Option<DeltaResult<()>> {
-        // Extract file action key
-        let file_action = self.deduplicator.extract_file_action(
-            i, getters,
-            false, // Do not skip remove actions, as they may be unexpired tombstones
-        );
-
-        let file_action = match file_action {
+        // Extract the file action and handle errors immediately
+        let (file_key, is_add) = match self.deduplicator.extract_file_action(i, getters, false) {
+            Ok(Some(action)) => action,
+            Ok(None) => return None, // If no file action is found, skip this row
             Err(e) => return Some(Err(e)),
-            Ok(action) => action,
-        };
-
-        // Check if this is a file action at all
-        let (file_key, is_add) = match file_action {
-            None => return None,
-            Some(action) => action,
         };
 
         // Check if we've already seen this file action
@@ -193,9 +183,9 @@ impl V1CheckpointVisitor<'_> {
     ) -> Option<DeltaResult<()>> {
         // minReaderVersion is a required field, so we check for its presence to determine if this is a protocol action.
         match getter.get_int(i, "protocol.minReaderVersion") {
-            Err(e) => return Some(Err(e)),
-            Ok(None) => return None, // Not a protocol action
             Ok(Some(_)) => (),       // It is a protocol action
+            Ok(None) => return None, // Not a protocol action
+            Err(e) => return Some(Err(e)),
         };
 
         // Skip duplicates
@@ -220,9 +210,9 @@ impl V1CheckpointVisitor<'_> {
     ) -> Option<DeltaResult<()>> {
         // id is a required field, so we check for its presence to determine if this is a metadata action.
         match getter.get_str(i, "metaData.id") {
-            Err(e) => return Some(Err(e)),
-            Ok(None) => return None, // Not a metadata action
             Ok(Some(_)) => (),       // It is a metadata action
+            Ok(None) => return None, // Not a metadata action
+            Err(e) => return Some(Err(e)),
         };
 
         // Skip duplicates
@@ -247,9 +237,9 @@ impl V1CheckpointVisitor<'_> {
     ) -> Option<DeltaResult<()>> {
         // Check for txn field
         let app_id = match getter.get_str(i, "txn.appId") {
-            Err(e) => return Some(Err(e)),
-            Ok(None) => return None, // Not a txn action
             Ok(Some(id)) => id,
+            Ok(None) => return None, // Not a txn action
+            Err(e) => return Some(Err(e)),
         };
 
         // If the app ID already exists in the set, the insertion will return false,
