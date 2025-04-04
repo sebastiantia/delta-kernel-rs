@@ -242,7 +242,7 @@ pub(crate) trait LogReplayProcessor: Sized {
     /// * `action_iter` - Iterator of action batches and their source flags
     ///
     /// Returns an iterator that yields the Output type of the processor.
-    fn process_batches(
+    fn process_actions_iter(
         mut self,
         action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
     ) -> impl Iterator<Item = DeltaResult<Self::Output>> {
@@ -273,7 +273,7 @@ pub(crate) trait LogReplayProcessor: Sized {
     /// A `DeltaResult<Vec<bool>>`, where each boolean indicates if the corresponding row should be included.
     /// If no filter is provided, all rows are selected.
     fn build_selection_vector(&self, batch: &dyn EngineData) -> DeltaResult<Vec<bool>> {
-        match self.get_data_skipping_filter() {
+        match self.data_skipping_filter() {
             Some(filter) => filter.apply(batch),
             None => Ok(vec![true; batch.len()]), // If no filter is provided, select all rows
         }
@@ -282,7 +282,7 @@ pub(crate) trait LogReplayProcessor: Sized {
     /// Returns an optional reference to the [`DataSkippingFilter`] used to filter rows
     /// when building the initial selection vector in `build_selection_vector`.
     /// If `None` is returned, no filter is applied, and all rows are selected.
-    fn get_data_skipping_filter(&self) -> Option<&DataSkippingFilter>;
+    fn data_skipping_filter(&self) -> Option<&DataSkippingFilter>;
 }
 
 /// This trait is used to determine if a processor's output contains any selected rows.

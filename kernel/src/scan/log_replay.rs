@@ -339,15 +339,15 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
 
     fn process_actions_batch(
         &mut self,
-        batch: Box<dyn EngineData>,
+        actions_batch: Box<dyn EngineData>,
         is_log_batch: bool,
     ) -> DeltaResult<Self::Output> {
         // Build an initial selection vector for the batch which has had the data skipping filter
         // applied. The selection vector is further updated by the deduplication visitor to remove
         // rows that are not valid adds.
-        let selection_vector = self.build_selection_vector(batch.as_ref())?;
+        let selection_vector = self.build_selection_vector(actions_batch.as_ref())?;
 
-        assert_eq!(selection_vector.len(), batch.len());
+        assert_eq!(selection_vector.len(), actions_batch.len());
 
         let logical_schema = self.logical_schema.clone();
         let transform = self.transform.clone();
@@ -361,10 +361,10 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
             partition_filter,
             is_log_batch,
         );
-        visitor.visit_rows_of(batch.as_ref())?;
+        visitor.visit_rows_of(actions_batch.as_ref())?;
 
         // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
-        let result = self.add_transform.evaluate(batch.as_ref())?;
+        let result = self.add_transform.evaluate(actions_batch.as_ref())?;
         Ok((
             result,
             visitor.selection_vector,
@@ -372,7 +372,7 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
         ))
     }
 
-    fn get_data_skipping_filter(&self) -> Option<&DataSkippingFilter> {
+    fn data_skipping_filter(&self) -> Option<&DataSkippingFilter> {
         self.data_skipping_filter.as_ref()
     }
 }
@@ -391,7 +391,7 @@ pub(crate) fn scan_action_iter(
     let log_scanner =
         ScanLogReplayProcessor::new(engine, physical_predicate, logical_schema, transform);
 
-    log_scanner.process_batches(action_iter)
+    log_scanner.process_actions_iter(action_iter)
 }
 
 #[cfg(test)]
