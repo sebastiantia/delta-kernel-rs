@@ -12,7 +12,7 @@
 //!
 //! TODO: V1CheckpointLogReplayProcessor & CheckpointData is a WIP.
 //! The module defines the CheckpointLogReplayProcessor which implements the LogReplayProcessor trait,
-//! as well as a [`V1CheckpointVisitor`] to traverse and process batches of log actions.
+//! as well as a [`CheckpointVisitor`] to traverse and process batches of log actions.
 //!
 //! The processing result is encapsulated in CheckpointData, which includes the transformed log data and
 //! a selection vector indicating which rows should be written to the checkpoint.
@@ -51,24 +51,29 @@ use crate::{DeltaResult, Error};
 ///
 /// The resulting filtered set of actions represents the minimal set needed to reconstruct
 /// the latest valid state of the table at the checkpointed version.
-#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-pub(crate) struct V1CheckpointVisitor<'seen> {
-    // File actions state
-    deduplicator: FileActionDeduplicator<'seen>, // Used to deduplicate file actions
-    selection_vector: Vec<bool>,                 // Tracks which rows to include in the final output
-    total_file_actions: i64,                     // i64 to match the `_last_checkpoint` file schema
-    total_add_actions: i64,                      // i64 to match the `_last_checkpoint` file schema
-    minimum_file_retention_timestamp: i64,       // i64 for comparison with remove.deletionTimestamp
-
-    // Non-file actions state
-    seen_protocol: bool, // Flag to keep only the first protocol action
-    seen_metadata: bool, // Flag to keep only the first metadata action
-    seen_txns: &'seen mut HashSet<String>, // Set of transaction IDs to deduplicate by appId
-    total_non_file_actions: i64, // i64 to match the `_last_checkpoint` file schema
+pub(crate) struct CheckpointVisitor<'seen> {
+    // Used to deduplicate file actions
+    deduplicator: FileActionDeduplicator<'seen>,
+    // Tracks which rows to include in the final output
+    selection_vector: Vec<bool>,
+    // i64 to match the `_last_checkpoint` file schema
+    total_file_actions: i64,
+    // i64 to match the `_last_checkpoint` file schema
+    total_add_actions: i64,
+    // i64 for comparison with remove.deletionTimestamp
+    minimum_file_retention_timestamp: i64,
+    // Flag to keep only the first protocol action
+    seen_protocol: bool,
+    // Flag to keep only the first metadata action
+    seen_metadata: bool,
+    // Set of transaction IDs to deduplicate by appId
+    seen_txns: &'seen mut HashSet<String>,
+    // i64 to match the `_last_checkpoint` file schema
+    total_non_file_actions: i64,
 }
 
 #[allow(unused)]
-impl V1CheckpointVisitor<'_> {
+impl CheckpointVisitor<'_> {
     // These index positions correspond to the order of columns defined in
     // `selected_column_names_and_types()`, and are used to extract file key information
     // for deduplication purposes
@@ -85,8 +90,8 @@ impl V1CheckpointVisitor<'_> {
         seen_protocol: bool,
         seen_metadata: bool,
         seen_txns: &'seen mut HashSet<String>,
-    ) -> V1CheckpointVisitor<'seen> {
-        V1CheckpointVisitor {
+    ) -> CheckpointVisitor<'seen> {
+        CheckpointVisitor {
             deduplicator: FileActionDeduplicator::new(
                 seen_file_keys,
                 is_log_batch,
@@ -278,7 +283,7 @@ impl V1CheckpointVisitor<'_> {
     }
 }
 
-impl RowVisitor for V1CheckpointVisitor<'_> {
+impl RowVisitor for CheckpointVisitor<'_> {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         // The data columns visited must be in the following order:
         // 1. ADD
@@ -343,7 +348,7 @@ mod tests {
         let data = action_batch();
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
-        let mut visitor = V1CheckpointVisitor::new(
+        let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
             true,
             vec![true; 8],
@@ -400,7 +405,7 @@ mod tests {
 
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
-        let mut visitor = V1CheckpointVisitor::new(
+        let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
             true,
             vec![true; 4],
@@ -433,7 +438,7 @@ mod tests {
 
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
-        let mut visitor = V1CheckpointVisitor::new(
+        let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
             true,
             vec![true; 2],
@@ -464,7 +469,7 @@ mod tests {
 
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
-        let mut visitor = V1CheckpointVisitor::new(
+        let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
             false, // is_log_batch = false (checkpoint batch)
             vec![true; 1],
@@ -503,7 +508,7 @@ mod tests {
 
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
-        let mut visitor = V1CheckpointVisitor::new(
+        let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
             true,
             vec![true; 4],
@@ -539,7 +544,7 @@ mod tests {
         let mut seen_txns = HashSet::new();
         seen_txns.insert("app1".to_string());
 
-        let mut visitor = V1CheckpointVisitor::new(
+        let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
             true,
             vec![true; 3],
@@ -577,7 +582,7 @@ mod tests {
 
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
-        let mut visitor = V1CheckpointVisitor::new(
+        let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
             true, // is_log_batch
             vec![true; 7],
