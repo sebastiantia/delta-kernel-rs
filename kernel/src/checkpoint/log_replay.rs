@@ -344,7 +344,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_v1_checkpoint_visitor() -> DeltaResult<()> {
+    fn test_checkpoint_visitor() -> DeltaResult<()> {
         let data = action_batch();
         let mut seen_file_keys = HashSet::new();
         let mut seen_txns = HashSet::new();
@@ -392,7 +392,7 @@ mod tests {
     /// - Remove actions with deletionTimestamp > minimumFileRetentionTimestamp (should be included)
     /// - Remove actions with missing deletionTimestamp (defaults to 0, should be excluded)
     #[test]
-    fn test_v1_checkpoint_visitor_boundary_cases_for_tombstone_expiration() -> DeltaResult<()> {
+    fn test_checkpoint_visitor_boundary_cases_for_tombstone_expiration() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             r#"{"remove":{"path":"exactly_at_threshold","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#,
             r#"{"remove":{"path":"one_below_threshold","deletionTimestamp":99,"dataChange":true,"partitionValues":{}}}"#,
@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_checkpoint_visitor_conflicting_file_actions_in_log_batch() -> DeltaResult<()> {
+    fn test_checkpoint_visitor_conflicting_file_actions_in_log_batch() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             r#"{"add":{"path":"file1","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#,
              // Duplicate path
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_checkpoint_visitor_file_actions_in_checkpoint_batch() -> DeltaResult<()> {
+    fn test_checkpoint_visitor_file_actions_in_checkpoint_batch() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             r#"{"add":{"path":"file1","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#,
         ]
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_checkpoint_visitor_conflicts_with_deletion_vectors() -> DeltaResult<()> {
+    fn test_checkpoint_visitor_conflicts_with_deletion_vectors() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"one","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
             // Same path but different DV
@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_checkpoint_visitor_already_seen_non_file_actions() -> DeltaResult<()> {
+    fn test_checkpoint_visitor_already_seen_non_file_actions() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
             r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
@@ -566,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_checkpoint_visitor_duplicate_non_file_actions() -> DeltaResult<()> {
+    fn test_checkpoint_visitor_duplicate_non_file_actions() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
             r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#, // Duplicate txn
