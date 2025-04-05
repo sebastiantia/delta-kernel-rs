@@ -200,20 +200,35 @@ impl<'seen> FileActionDeduplicator<'seen> {
 /// Log replay processors scan transaction logs in **reverse chronological order** (newest to oldest),
 /// filtering and transforming action batches into specialized output types. These processors:
 ///
-/// - **Track and deduplicate file actions** to ensure only the latest relevant changes are kept.
+/// - **Track and deduplicate file actions** to apply appropriate `Remove` actions to corresponding
+///   `Add` actions (and omit the file from the log replay output)
 /// - **Maintain selection vectors** to indicate which actions in each batch should be included.
 /// - **Apply custom filtering logic** based on the processor’s purpose (e.g., checkpointing, scanning).
+/// - **Data skipping** filters are applied to the initial selection vector to reduce the number of rows
+///   processed by the processor, (if a filter is provided).
 ///
 /// Implementations:
 /// - `ScanLogReplayProcessor`: Used for table scans, this processor filters and selects deduplicated  
 ///   `Add` actions from log batches to reconstruct the view of the table at a specific point in time.
-///   Note that scans do not expose `Remove` actions.
-/// - `V1CheckpointLogReplayProcessor`(WIP): Will be responsible for processing log batches to construct  
-///   V1 spec checkpoint files. Unlike scans, checkpoint processing includes additional actions,  
-///   such as `Remove`, `Metadata`, and `Protocol`, required to fully reconstruct table state.
+///   Note that scans do not expose `Remove` actions. Data skipping may be applied when a predicate is  
+///   provided.
 ///
-/// The `Output` type must implement [`HasSelectionVector`] to enable filtering of batches
-/// with no selected rows.
+/// - `CheckpointLogReplayProcessor` (WIP): Will be responsible for processing log batches to construct  
+///   V1 spec checkpoint files. Unlike scans, checkpoint processing includes additional actions, such as  
+///   `Remove`, `Metadata`, and `Protocol`, required to fully reconstruct table state.  
+///   Data skipping is not applied during checkpoint processing.
+///
+/// The `Output` type represents the material result of log replay, and it must implement the
+/// `HasSelectionVector` trait to allow filtering of irrelevant rows:
+///
+/// - For **scans**, the output type is `ScanData`, which contains the file actions (`Add` actions) that
+///   need to be applied to build the table's view, accompanied by a **selection vector** that identifies
+///   which rows should be included. A transform vector may also be included to handle schema changes,
+///   such as renaming columns or modifying data types.
+///
+/// - For **checkpoints**, the output includes the actions necessary to write to the checkpoint file (`Add`,
+///   `Remove`, `Metadata`, `Protocol` actions), filtered by the **selection vector** to determine which
+///   rows are included in the final checkpoint.
 ///
 /// TODO: Refactor the Change Data Feed (CDF) processor to use this trait.
 pub(crate) trait LogReplayProcessor: Sized {
@@ -224,7 +239,7 @@ pub(crate) trait LogReplayProcessor: Sized {
     /// Processes a batch of actions and returns the filtered results.
     ///
     /// # Arguments
-    /// - `actions_batch` - A boxed [`EngineData`] instance representing a batch of actions.
+    /// - `actions_batch` - A reference to an [`EngineData`] instance representing a batch of actions.
     /// - `is_log_batch` - `true` if the batch originates from a commit log, `false` if from a checkpoint.
     ///
     /// Returns a [`DeltaResult`] containing the processor’s output, which includes only selected actions.
@@ -232,7 +247,7 @@ pub(crate) trait LogReplayProcessor: Sized {
     /// Note: Since log replay is stateful, processing may update internal processor state (e.g., deduplication sets).
     fn process_actions_batch(
         &mut self,
-        actions_batch: Box<dyn EngineData>,
+        actions_batch: &dyn EngineData,
         is_log_batch: bool,
     ) -> DeltaResult<Self::Output>;
 
@@ -249,7 +264,7 @@ pub(crate) trait LogReplayProcessor: Sized {
         action_iter
             .map(move |action_res| {
                 let (batch, is_log_batch) = action_res?;
-                self.process_actions_batch(batch, is_log_batch)
+                self.process_actions_batch(batch.as_ref(), is_log_batch)
             })
             .filter(|res| {
                 // TODO: Leverage .is_none_or() when msrv = 1.82
