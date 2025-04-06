@@ -25,7 +25,7 @@
 //! `.get_checkpoint_info()` is called.
 //! - Writing the _last_checkpoint file when `.finalize_checkpoint()` is called.
 //!
-//! Note:
+//! Notes:
 //! - Multi-file V2 checkpoints are not supported yet. The API is designed to be extensible for future
 //!   multi-file support, but the current implementation only supports single-file checkpoints.
 //! - Multi-file V1 checkpoints are DEPRECATED.
