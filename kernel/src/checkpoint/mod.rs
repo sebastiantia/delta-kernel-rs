@@ -22,7 +22,7 @@
 //!
 //! The builder returns the `CheckpointWriter` which is responsible for:
 //! - Producing the correct set of actions to be written to the checkpoint file when
-//! `.get_checkpoint_info()` is called.
+//!   `.get_checkpoint_info()` is called.
 //! - Writing the _last_checkpoint file when `.finalize_checkpoint()` is called.
 //!
 //! Notes:
