@@ -1,7 +1,7 @@
 //! This module implements log replay functionality specifically for checkpoint writes in delta tables.
 //!
 //! The primary goal is to process Delta log actions in reverse chronological order (from most recent to
-//! least recent) to produce the minimal set of actions required to reconstruct the table state in a V1 checkpoint.
+//! least recent) to produce the minimal set of actions required to reconstruct the table state in a checkpoint.
 //!
 //! ## Key Responsibilities
 //! - Filtering: Only the most recent protocol and metadata actions are retained, and for each transaction
@@ -10,8 +10,8 @@
 //!   duplicate or obsolete actions (including remove actions) are ignored.
 //! - Retention Filtering: Tombstones older than the configured `minimum_file_retention_timestamp` are excluded.
 //!
-//! The module defines the [`V1CheckpointLogReplayProccessor`] which implements the LogReplayProcessor trait,
-//! as well as a [`V1CheckpointVisitor`] to traverse and process batches of log actions.
+//! The module defines the [`CheckpointLogReplayProcessor`] which implements the LogReplayProcessor trait,
+//! as well as a [`CheckpointVisitor`] to traverse and process batches of log actions.
 //!
 //! The processing result is encapsulated in [`CheckpointData`], which includes the log data accompanied with
 //! a selection vector indicating which rows should be included in the checkpoint file.
@@ -30,11 +30,12 @@ use crate::schema::{column_name, ColumnName, ColumnNamesAndTypes, DataType};
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error};
 
-/// `CheckpointData` contains a batch of filtered actions for checkpoint creation.
-/// This structure holds a single batch of engine data along with a selection vector
-/// that marks which rows should be included in the V1 checkpoint file.
 /// TODO!(seb): change to type CheckpointData = FilteredEngineData, when introduced
-pub struct CheckpointData {
+///
+/// [`CheckpointData`] contains a batch of filtered actions for checkpoint creation.
+/// This structure holds a single batch of engine data along with a selection vector
+/// that marks which rows should be included in the checkpoint file.
+pub(crate) struct CheckpointData {
     /// The original engine data containing the actions
     #[allow(dead_code)] // TODO: Remove once checkpoint_v1 API is implemented
     data: Box<dyn EngineData>,
@@ -49,13 +50,13 @@ impl HasSelectionVector for CheckpointData {
     }
 }
 
-/// The [`V1CheckpointLogReplayProccessor`] is an implementation of the [`LogReplayProcessor`]
+/// The [`CheckpointLogReplayProcessor`] is an implementation of the [`LogReplayProcessor`]
 /// trait that filters log segment actions for inclusion in a V1 spec checkpoint file.
 ///
 /// It processes each action batch via the `process_actions_batch` method, using the
-/// [`V1CheckpointVisitor`] to convert each batch into a [`CheckpointData`] instance that
+/// [`CheckpointVisitor`] to convert each batch into a [`CheckpointData`] instance that
 /// contains only the actions required for the checkpoint.
-pub(crate) struct V1CheckpointLogReplayProccessor {
+pub(crate) struct CheckpointLogReplayProcessor {
     /// Tracks file actions that have been seen during log replay to avoid duplicates.
     /// Contains (data file path, dv_unique_id) pairs as `FileActionKey` instances.
     seen_file_keys: HashSet<FileActionKey>,
@@ -79,7 +80,7 @@ pub(crate) struct V1CheckpointLogReplayProccessor {
     minimum_file_retention_timestamp: i64,
 }
 
-impl LogReplayProcessor for V1CheckpointLogReplayProccessor {
+impl LogReplayProcessor for CheckpointLogReplayProcessor {
     // Define the processing result type as CheckpointData
     type Output = CheckpointData;
 
@@ -102,8 +103,7 @@ impl LogReplayProcessor for V1CheckpointLogReplayProccessor {
         batch: Box<dyn EngineData>,
         is_log_batch: bool,
     ) -> DeltaResult<Self::Output> {
-        // Initialize selection vector with all rows un-selected
-        let selection_vector = vec![false; batch.len()];
+        let selection_vector = vec![true; batch.len()];
         assert_eq!(
             selection_vector.len(),
             batch.len(),
@@ -111,7 +111,7 @@ impl LogReplayProcessor for V1CheckpointLogReplayProccessor {
         );
 
         // Create the checkpoint visitor to process actions and update selection vector
-        let mut visitor = V1CheckpointVisitor::new(
+        let mut visitor = CheckpointVisitor::new(
             &mut self.seen_file_keys,
             is_log_batch,
             selection_vector,
@@ -143,7 +143,7 @@ impl LogReplayProcessor for V1CheckpointLogReplayProccessor {
     }
 }
 
-impl V1CheckpointLogReplayProccessor {
+impl CheckpointLogReplayProcessor {
     pub(crate) fn new(
         total_actions_counter: Arc<AtomicI64>,
         total_add_actions_counter: Arc<AtomicI64>,
@@ -176,12 +176,12 @@ pub(crate) fn checkpoint_actions_iter(
     total_add_actions_counter: Arc<AtomicI64>,
     minimum_file_retention_timestamp: i64,
 ) -> impl Iterator<Item = DeltaResult<CheckpointData>> + Send + 'static {
-    let log_scanner = V1CheckpointLogReplayProccessor::new(
+    let log_scanner = CheckpointLogReplayProcessor::new(
         total_actions_counter,
         total_add_actions_counter,
         minimum_file_retention_timestamp,
     );
-    V1CheckpointLogReplayProccessor::apply_to_iterator(log_scanner, action_iter)
+    CheckpointLogReplayProcessor::apply_to_iterator(log_scanner, action_iter)
 }
 
 /// A visitor that filters actions for inclusion in a V1 spec checkpoint file.
