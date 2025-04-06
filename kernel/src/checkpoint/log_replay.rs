@@ -10,12 +10,12 @@
 //!   duplicate or obsolete actions (including remove actions) are ignored.
 //! - Retention Filtering: Tombstones older than the configured `minimum_file_retention_timestamp` are excluded.
 //!
-//! TODO: V1CheckpointLogReplayProcessor & CheckpointData is a WIP.
-//! The module defines the CheckpointLogReplayProcessor which implements the LogReplayProcessor trait,
+//! TODO: `CheckpointLogReplayProcessor` struct & `CheckpointData` type
+//! The module defines the CheckpointLogReplayProcessor which implements the `LogReplayProcessor` trait,
 //! as well as a [`CheckpointVisitor`] to traverse and process batches of log actions.
 //!
-//! The processing result is encapsulated in CheckpointData, which includes the transformed log data and
-//! a selection vector indicating which rows should be written to the checkpoint.
+//! The processing result is encapsulated in `CheckpointData`, which includes the log data accompanied with
+//! a selection vector indicating which rows should be included in the checkpoint file.
 //!
 //! For log replay functionality used during table scans (i.e. for reading checkpoints and commit logs), refer to
 //! the `scan/log_replay.rs` module.
@@ -52,10 +52,12 @@ use crate::{DeltaResult, Error};
 /// The resulting filtered set of actions represents the minimal set needed to reconstruct
 /// the latest valid state of the table at the checkpointed version.
 pub(crate) struct CheckpointVisitor<'seen> {
-    // Used to deduplicate file actions
+    // Desduplicates file actions
     deduplicator: FileActionDeduplicator<'seen>,
     // Tracks which rows to include in the final output
     selection_vector: Vec<bool>,
+    // TODO: _last_checkpoint schema should be updated to use u64 instead of i64
+    // for fields that are not expected to be negative. (Issue #786)
     // i64 to match the `_last_checkpoint` file schema
     total_file_actions: i64,
     // i64 to match the `_last_checkpoint` file schema
@@ -140,6 +142,7 @@ impl CheckpointVisitor<'_> {
     /// Returns Some(Ok(())) if the row contains a valid file action to be included in the checkpoint.
     /// Returns None if the row doesn't contain a file action or should be skipped.
     /// Returns Some(Err(...)) if there was an error processing the action.
+    ///
     /// Note: This function handles both add and remove actions, applying deduplication logic and
     /// tombstone expiration rules as needed.
     fn check_file_action<'a>(
@@ -198,10 +201,10 @@ impl CheckpointVisitor<'_> {
             return None;
         }
 
-        // Valid, non-duplicate protocol action
+        // Valid, non-duplicate protocol action to be included
         self.seen_protocol = true;
         self.total_non_file_actions += 1;
-        Some(Ok(())) // Include this action
+        Some(Ok(()))
     }
     /// Processes a potential metadata action to determine if it should be included in the checkpoint.
     ///
@@ -225,10 +228,10 @@ impl CheckpointVisitor<'_> {
             return None;
         }
 
-        // Valid, non-duplicate metadata action
+        // Valid, non-duplicate metadata action to be included
         self.seen_metadata = true;
         self.total_non_file_actions += 1;
-        Some(Ok(())) // Include this action
+        Some(Ok(()))
     }
     /// Processes a potential txn action to determine if it should be included in the checkpoint.
     ///
@@ -253,15 +256,15 @@ impl CheckpointVisitor<'_> {
             return None;
         }
 
-        // Valid, non-duplicate txn action
+        // Valid, non-duplicate txn action to be included
         self.total_non_file_actions += 1;
-        Some(Ok(())) // Include this action
+        Some(Ok(()))
     }
 
     /// Determines if a row in the batch should be included in the checkpoint by checking
-    /// if it contains any valid action type.
+    /// if it contains any valid action type for the checkpoint.
     ///
-    /// Note:This method checks each action type in sequence and prioritizes file actions as
+    /// Note: This method checks each action type in sequence, and prioritizes file actions as
     /// they appear most frequently, followed by transaction, protocol, and metadata actions.
     pub(crate) fn is_valid_action<'a>(
         &mut self,
@@ -269,8 +272,6 @@ impl CheckpointVisitor<'_> {
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<bool> {
         // Try each action type in sequence, stopping at the first match.
-        // We check file actions first as they appear most frequently in the log,
-        // followed by txn, protocol, and metadata actions in descending order of frequency.
         let is_valid = self
             .check_file_action(i, getters)
             .or_else(|| self.check_txn_action(i, getters[11]))
@@ -360,7 +361,6 @@ mod tests {
 
         visitor.visit_rows_of(data.as_ref())?;
 
-        // Combined results from both file and non-file actions
         // Row 0 is an add action (included)
         // Row 1 is a remove action (included)
         // Row 2 is a commit info action (excluded)
@@ -371,11 +371,8 @@ mod tests {
         // Row 7 is a txn action (included)
         let expected = vec![true, true, false, true, true, false, false, true];
 
-        // Verify file action results
         assert_eq!(visitor.total_file_actions, 2);
         assert_eq!(visitor.total_add_actions, 1);
-
-        // Verify non-file action results
         assert!(visitor.seen_protocol);
         assert!(visitor.seen_metadata);
         assert_eq!(visitor.seen_txns.len(), 1);
@@ -487,7 +484,8 @@ mod tests {
         assert_eq!(visitor.total_add_actions, 1);
         assert_eq!(visitor.total_non_file_actions, 0);
         // The action should NOT be added to the seen_file_keys set as it's a checkpoint batch
-        // and actions in checkpoint batches do not conflict with
+        // and actions in checkpoint batches do not conflict with each other.
+        // This is a key difference from log batches, where actions can conflict.
         assert!(seen_file_keys.is_empty());
         Ok(())
     }
@@ -496,11 +494,11 @@ mod tests {
     fn test_checkpoint_visitor_conflicts_with_deletion_vectors() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"one","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
-            // Same path but different DV
+            // Same path but different DV, should be included
             r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"two","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#, 
-            // Duplicate of first entry
+            // Duplicate of first entry, should be excluded
             r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"one","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#, 
-            // Conflicting remove action with DV
+            // Conflicting remove action with DV, should be excluded
             r#"{"remove":{"path":"file1","deletionTimestamp":100,"dataChange":true,"deletionVector":{"storageType":"one","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
         ]
         .into();
