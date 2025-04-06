@@ -1,27 +1,36 @@
 //! # Delta Kernel Checkpoint API
 //!
-//! This module implements the API for writing single-file checkpoints in Delta tables.
+//! This module implements the API for writing checkpoints in delta tables.
 //! Checkpoints provide a compact summary of the table state, enabling faster recovery by
-//! avoiding full log replay. This API supports multiple checkpoint types:
+//! avoiding full log replay. This API supports three checkpoint types:
 //!
 //! 1. **Single-file Classic-named V1 Checkpoint** – for legacy tables that do not support
-//!    the v2Checkpoints feature.
-//! 2. **Single-file Classic-named V2 Checkpoint** – for backwards compatibility when the
-//!    v2Checkpoints feature is enabled.
-//! 3. **Single-file UUID-named V2 Checkpoint** – the recommended option for small to medium
-//!    tables with v2Checkpoints support.
+//!    the `v2Checkpoints` reader/writer feature.
+//! 2. **Single-file Classic-named V2 Checkpoint** – ensures backwards compatibility by
+//!    allowing legacy readers to recognize the checkpoint file, read the protocol action, and
+//!    fail gracefully.
+//! 3. **Single-file UUID-named V2 Checkpoint** – the default and preferred option for small to
+//!    medium tables with `v2Checkpoints` reader/writer feature enabled.  
 //!
-//! TODO!(seb): API WIP
-//! The API is designed using a builder pattern via the `CheckpointBuilder`, which performs
-//! table feature detection and configuration validation before constructing a `CheckpointWriter`.
+//! TODO!(seb): API is a WIP
+//! The API follows a builder pattern using `CheckpointBuilder`, which performs tbale feature
+//! detection and configuration validation. Depending on table features and builder options:
 //!
-//! The `CheckpointWriter` then orchestrates the process of:
-//! - Replaying Delta log actions (via the `checkpoint/log_replay.rs` module) to filter, deduplicate,
-//!   and select the actions that represent the table's current state.
-//! - Writing the consolidated checkpoint data to a single file.
-//! - Finalizing the checkpoint by generating a `_last_checkpoint` file with metadata.
+//! - Without `v2Checkpoints`: produces a **Classic-named V1** checkpoint.
+//! - With `v2Checkpoints`: produces a **UUID-named V2** checkpoint.
+//! - With `v2Checkpoints` + `.classic_naming()`: produces a **Classic-named V2** checkpoint.
 //!
-//! ## Example
+//! The builder returns the `CheckpointWriter` which is responsible for:
+//! - Producing the correct set of actions to be written to the checkpoint file when
+//! `.get_checkpoint_info()` is called.
+//! - Writing the _last_checkpoint file when `.finalize_checkpoint()` is called.
+//!
+//! Note:
+//! - Multi-file V2 checkpoints are not supported yet. The API is designed to be extensible for future
+//!   multi-file support, but the current implementation only supports single-file checkpoints.
+//! - Multi-file V1 checkpoints are DEPRECATED.
+//!
+//! ## Example: Writing a classic-named V1/V2 checkpoint (depending on `v2Checkpoints` feature support)
 //!
 //! ```ignore
 //! let path = "./tests/data/app-txn-no-checkpoint";
@@ -32,7 +41,7 @@
 //! let builder = table.checkpoint(&engine, Some(2))?;
 //!
 //! // Optionally configure the builder (e.g., force classic naming)
-//! let writer = builder.with_classic_naming(true);
+//! let writer = builder.with_classic_naming();
 //!
 //! // Build the checkpoint writer
 //! let mut writer = builder.build(&engine)?;
@@ -40,7 +49,9 @@
 //! // Retrieve checkpoint data (ensuring single consumption)
 //! let checkpoint_data = writer.get_checkpoint_info()?;
 //!
-//! // Write checkpoint data to file and collect metadata before finalizing
+//! /* Write checkpoint data to file and collect metadata before finalizing */
+//!
+//! // Write the _last_checkpoint file
 //! writer.finalize_checkpoint(&engine, &checkpoint_metadata)?;
 //! ```
 //!
