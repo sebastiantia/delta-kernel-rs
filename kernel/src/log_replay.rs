@@ -247,7 +247,7 @@ pub(crate) trait LogReplayProcessor: Sized {
     /// Note: Since log replay is stateful, processing may update internal processor state (e.g., deduplication sets).
     fn process_actions_batch(
         &mut self,
-        actions_batch: &dyn EngineData,
+        actions_batch: Box<dyn EngineData>,
         is_log_batch: bool,
     ) -> DeltaResult<Self::Output>;
 
@@ -264,7 +264,7 @@ pub(crate) trait LogReplayProcessor: Sized {
         action_iter
             .map(move |action_res| {
                 let (batch, is_log_batch) = action_res?;
-                self.process_actions_batch(batch.as_ref(), is_log_batch)
+                self.process_actions_batch(batch, is_log_batch)
             })
             .filter(|res| {
                 // TODO: Leverage .is_none_or() when msrv = 1.82
