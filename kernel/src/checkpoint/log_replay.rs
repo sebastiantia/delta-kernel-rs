@@ -1,23 +1,25 @@
-//! This module implements log replay functionality specifically for checkpoint writes in delta tables.
+//! [`CheckpointLogReplayProcessor`] performs log replay specifically for checkpoint creation in delta tables.
 //!
-//! The primary goal is to process Delta log actions in reverse chronological order (from most recent to
-//! least recent) to produce the minimal set of actions required to reconstruct the table state in a checkpoint.
+//! During checkpoint creation, the processor reads batches of log actions (in reverse chronological order)
+//! and performs the following steps:
 //!
-//! ## Key Responsibilities
-//! - Filtering: Only the most recent protocol and metadata actions are retained, and for each transaction
-//!   (identified by its app ID), only the latest action is kept.
-//! - Deduplication: File actions are deduplicated based on file path and deletion vector unique ID so that
-//!   duplicate or obsolete actions (including remove actions) are ignored.
-//! - Retention Filtering: Tombstones older than the configured `minimum_file_retention_timestamp` are excluded.
+//! - Protocol and Metadata Filtering: Ensures that only the most recent protocol and metadata actions
+//!   are retained
+//! - Transaction Deduplication: For each transaction (identified by app ID), only the latest action
+//!   is preserved to maintain a consistent transaction history.
+//! - File Action Deduplication: Leverages the [`FileActionDeduplicator`] mechanism to ensure that
+//!   for each unique file (identified by its path and deletion vector unique ID), only the most
+//!   recent valid action is included.
+//! - Tombstone Retention Management: Excludes file removal tombstones that are older than the
+//!   configured `minimum_file_retention_timestamp`, reducing checkpoint size without compromising
+//!   table consistency.
+//! - Action Type Filtering: Excludes other action types such as commitInfo, and CDC actions that
+//!   aren't required for reconstructing table state.
 //!
-//! The module defines the [`CheckpointLogReplayProcessor`] which implements the LogReplayProcessor trait,
-//! as well as a [`CheckpointVisitor`] to traverse and process batches of log actions.
-//!
-//! The processing result is encapsulated in [`CheckpointData`], which includes the log data accompanied with
-//! a selection vector indicating which rows should be included in the checkpoint file.
-//!
-//! For log replay functionality used during table scans (i.e. for reading checkpoints and commit logs), refer to
-//! the `scan/log_replay.rs` module.
+//! As an implementation of [`LogReplayProcessor`], [`CheckpointLogReplayProcessor`] provides the
+//! `process_actions_batch` method, which applies these steps to each batch of log actions and
+//! produces a [`CheckpointData`] result. This result encapsulates both the original batch data
+//! and a selection vector indicating which rows should be included in the checkpoint file.
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -56,7 +58,7 @@ impl HasSelectionVector for CheckpointData {
 /// trait that filters log segment actions for inclusion in a V1 spec checkpoint file.
 ///
 /// It processes each action batch via the `process_actions_batch` method, using the
-/// [`CheckpointVisitor`] to convert each [`EngineData`] batch into a [`CheckpointData`]
+/// [`CheckpointVisitor`] to map each [`EngineData`] batch into a [`CheckpointData`]
 /// instance that reflect only the necessary actions for the checkpoint.
 pub(crate) struct CheckpointLogReplayProcessor {
     /// Tracks file actions that have been seen during log replay to avoid duplicates.
@@ -167,7 +169,7 @@ impl CheckpointLogReplayProcessor {
 ///
 /// Note: The 'action_iter' parameter is an iterator of (engine_data, bool) tuples that _must_ be
 /// sorted by the order of the actions in the log from most recent to least recent.
-#[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
+#[allow(unused)] // TODO: Remove once API is implemented
 pub(crate) fn checkpoint_actions_iter(
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
     total_actions_counter: Rc<RefCell<i64>>,
