@@ -249,11 +249,11 @@ impl TableConfiguration {
     pub(crate) fn is_v2_checkpoint_supported(&self) -> bool {
         let read_supported = self
             .protocol()
-            .has_reader_feature(&ReaderFeatures::V2Checkpoint)
+            .has_reader_feature(&ReaderFeature::V2Checkpoint)
             && self.protocol.min_reader_version() == 3;
         let write_supported = self
             .protocol()
-            .has_writer_feature(&WriterFeatures::V2Checkpoint)
+            .has_writer_feature(&WriterFeature::V2Checkpoint)
             && self.protocol.min_writer_version() == 7;
         read_supported && write_supported
     }

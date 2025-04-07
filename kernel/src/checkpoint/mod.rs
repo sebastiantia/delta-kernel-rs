@@ -135,19 +135,31 @@ pub struct SingleFileCheckpointData {
 /// The [`CheckpointWriter`] orchestrates creating checkpoint data and finalizing
 /// the checkpoint file. It tracks statistics about included actions and
 /// ensures checkpoint data is consumed only once.
+///
+/// # Usage Flow
+/// 1. Create via `CheckpointBuilder::build()`
+/// 2. Call `get_checkpoint_info()` to obtain the [`SingleFileCheckpointData`]
+///    containing the path and action iterator for the checkpoint
+/// 3. Write the checkpoint data to storage (implementation-specific)
+/// 4. Call `finalize_checkpoint()` to create the _last_checkpoint file
+///
+/// # Internal Process
+/// 1. Reads relevant actions from the log segment using the checkpoint read schema
+/// 2. Applies selection and deduplication logic with the `CheckpointLogReplayProcessor`
+/// 3. Tracks counts of included actions for to be written to the _last_checkpoint file
+/// 5. Chains the [`CheckpointMetadata`] action to the actions iterator (for V2 checkpoints)
 pub struct CheckpointWriter {
     /// The snapshot from which the checkpoint is created
     snapshot: Snapshot,
-
     /// Whether the table supports the `v2Checkpoints` feature
     is_v2_checkpoints_supported: bool,
-
+    /// Note: Rc<RefCell<i64>> provides shared mutability for our counters, allowing the
+    /// returned actions iterator from `.get_checkpoint_info()` to update the counters,
+    /// and the `finalize_checkpoint()` method to read them...
     /// Counter for total actions included in the checkpoint
     total_actions_counter: Rc<RefCell<i64>>,
-
     /// Counter for Add actions included in the checkpoint
     total_add_actions_counter: Rc<RefCell<i64>>,
-
     /// Flag to track if checkpoint data has been consumed
     data_consumed: bool,
 }
@@ -295,6 +307,39 @@ impl CheckpointWriter {
 /// The CheckpointBuilder provides an interface for configuring checkpoint
 /// generation. It handles table feature detection and enforces compatibility
 /// between configuration options and table features.
+///
+/// # Usage Flow
+/// 1. Create a builder via `Table::checkpoint()`
+/// 2. Optionally configure with `with_classic_naming()`
+/// 3. Call `build()` to create a CheckpointWriter
+///
+/// # Checkpoint Format Selection Logic
+/// - For tables without v2Checkpoints support: Always uses Single-file Classic-named V1
+/// - For tables with v2Checkpoints support:
+///   - With classic naming = false (default): Single-file UUID-named V2
+///   - With classic naming = true: Single-file Classic-named V2
+///
+/// # Checkpoint Naming Conventions
+///
+/// ## UUID-named V2 Checkpoints
+/// These follow the V2 spec using file name pattern: `n.checkpoint.u.{json/parquet}`, where:
+/// - `n` is the snapshot version (zero-padded to 20 digits)
+/// - `u` is a UUID
+/// e.g. 00000000000000000010.checkpoint.80a083e8-7026-4e79-81be-64bd76c43a11.json
+///
+/// ## Classic-named Checkpoints
+/// A classic checkpoint for version `n` of the table consists of a file named
+/// `n.checkpoint.parquet` where `n` is zero-padded to have length 20. These could
+/// follow either V1 spec or V2 spec depending on the table's support for the
+/// `v2Checkpoints` feature.
+/// e.g. 00000000000000000010.checkpoint.parquet
+///
+/// # Example
+/// ```ignore
+/// let table = Table::try_from_uri(path)?;
+/// let builder = table.checkpoint(&engine, Some(version))?;
+/// let writer = builder.with_classic_naming().build()?;
+/// ```
 pub struct CheckpointBuilder {
     /// The table snapshot from which to create the checkpoint
     snapshot: Snapshot,
@@ -313,9 +358,9 @@ impl CheckpointBuilder {
 
     /// Configures the builder to use the classic naming scheme
     ///
-    /// Classic naming is required for V1 checkpoints and optional for V2 checkpoints.
+    /// Classic naming is optional for V2 checkpoints, but the only option for V1 checkpoints.
     /// - For V1 checkpoints, this method is a no-op.
-    /// - For V2 checkpoints, the default is UUID naming unless this method is called.
+    /// - For V2 checkpoints, the default is UUID-naming unless this method is called.
     pub fn with_classic_naming(mut self) -> Self {
         self.with_classic_naming = true;
         self
