@@ -32,7 +32,8 @@
 //!
 //! ## Example: Writing a classic-named V1/V2 checkpoint (depending on `v2Checkpoints` feature support)
 //!
-//! ```ignore (TODO!(seb) un-ignore)
+//! TODO(seb): unignore example
+//! ```ignore
 //! let path = "./tests/data/app-txn-no-checkpoint";
 //! let engine = Arc::new(SyncEngine::new());
 //! let table = Table::try_from_uri(path)?;
