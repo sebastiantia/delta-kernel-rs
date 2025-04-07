@@ -13,6 +13,7 @@ use crate::actions::deletion_vector::{
 };
 use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME, SIDECAR_NAME};
 use crate::expressions::{ColumnName, Expression, ExpressionRef, ExpressionTransform, Scalar};
+use crate::log_replay::HasSelectionVector;
 use crate::predicates::{DefaultPredicateEvaluator, EmptyColumnResolver};
 use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{
@@ -324,6 +325,12 @@ pub(crate) enum TransformExpr {
 // (data, deletion_vec, transforms)
 pub type ScanData = (Box<dyn EngineData>, Vec<bool>, Vec<Option<ExpressionRef>>);
 
+impl HasSelectionVector for ScanData {
+    fn has_selected_rows(&self) -> bool {
+        self.1.contains(&true)
+    }
+}
+
 /// The result of building a scan over a table. This can be used to get the actual data from
 /// scanning the table.
 pub struct Scan {
@@ -389,12 +396,12 @@ impl Scan {
     ///   `filter_record_batch`, you _need_ to extend this vector to the full length of the batch or
     ///   arrow will drop the extra rows.
     /// - `Vec<Option<Expression>>`: Transformation expressions that need to be applied. For each
-    ///    row at index `i` in the above data, if an expression exists at index `i` in the `Vec`,
-    ///    the associated expression _must_ be applied to the data read from the file specified by
-    ///    the row. The resultant schema for this expression is guaranteed to be `Scan.schema()`. If
-    ///    the item at index `i` in this `Vec` is `None`, or if the `Vec` contains fewer than `i`
-    ///    elements, no expression need be applied and the data read from disk is already in the
-    ///    correct logical state.
+    ///   row at index `i` in the above data, if an expression exists at index `i` in the `Vec`,
+    ///   the associated expression _must_ be applied to the data read from the file specified by
+    ///   the row. The resultant schema for this expression is guaranteed to be `Scan.schema()`. If
+    ///   the item at index `i` in this `Vec` is `None`, or if the `Vec` contains fewer than `i`
+    ///   elements, no expression need be applied and the data read from disk is already in the
+    ///   correct logical state.
     pub fn scan_data(
         &self,
         engine: &dyn Engine,
@@ -526,7 +533,7 @@ impl Scan {
                 // partition columns, but the read schema we use here does _NOT_ include partition
                 // columns. So we cannot safely assume that all column references are valid. See
                 // https://github.com/delta-io/delta-kernel-rs/issues/434 for more details.
-                let read_result_iter = engine.get_parquet_handler().read_parquet_files(
+                let read_result_iter = engine.parquet_handler().read_parquet_files(
                     &[meta],
                     global_state.physical_schema.clone(),
                     physical_predicate.clone(),
@@ -656,7 +663,7 @@ pub fn selection_vector(
     descriptor: &DeletionVectorDescriptor,
     table_root: &Url,
 ) -> DeltaResult<Vec<bool>> {
-    let fs_client = engine.get_file_system_client();
+    let fs_client = engine.file_system_client();
     let dv_treemap = descriptor.read(fs_client, table_root)?;
     Ok(deletion_treemap_to_bools(dv_treemap))
 }
