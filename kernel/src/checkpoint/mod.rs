@@ -90,7 +90,7 @@ use crate::{
     expressions::Scalar,
     schema::{SchemaRef, StructType},
     snapshot::Snapshot,
-    DeltaResult, Engine, EngineData, Error, ExpressionHandlerExtension,
+    DeltaResult, Engine, EngineData, Error, EvaluationHandlerExtension,
 };
 use log_replay::{checkpoint_actions_iter, CheckpointData};
 use std::{
@@ -384,7 +384,7 @@ fn create_checkpoint_metadata_batch(
 ) -> DeltaResult<Option<DeltaResult<CheckpointData>>> {
     if is_v2_checkpoint {
         let values: &[Scalar] = &[version.into()];
-        let checkpoint_metadata_batch = engine.get_expression_handler().create_one(
+        let checkpoint_metadata_batch = engine.evaluation_handler().create_one(
             // TODO: Include checkpointMetadata.tags when maps are supported
             Arc::new(CheckpointMetadata::to_schema().project_as_struct(&["version"])?),
             &values,
