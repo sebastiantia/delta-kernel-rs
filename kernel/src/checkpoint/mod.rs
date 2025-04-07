@@ -73,9 +73,9 @@ use crate::{
     DeltaResult, Engine, EngineData, Error,
 };
 
-pub(crate) mod log_replay;
+mod log_replay;
 
-/// This schema contains all the actions that we care to extract from the log
+/// This schema contains all the actions that we care to extract from log
 /// files for the purpose of creating a checkpoint.
 static CHECKPOINT_READ_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     StructType::new([
@@ -115,47 +115,24 @@ pub struct SingleFileCheckpointData {
 /// It manages the one-time consumption of checkpoint data and tracks statistics
 /// about the actions included in the checkpoint.
 pub struct CheckpointWriter {
-    /// Using Option to enforce single consumption at compile time
-    single_file_checkpoint_data: Option<SingleFileCheckpointData>,
+    // The snapshot from which the checkpoint is created
+    snapshot: Snapshot,
+    // Flag indicating if the table supports the `v2Checkpoints` reader/write feature
+    is_v2_checkpoints_supported: bool,
 
-    /// Total actions counter to be written to the last checkpoint file
-    #[allow(dead_code)] // TODO: Remove when finalize_checkpoint is implemented
+    // TODO, i dont think arc is necessary here
     total_actions_counter: Arc<AtomicI64>,
-
-    /// Total add actions counter to be written to the last checkpoint file    
-    #[allow(dead_code)] // TODO: Remove when finalize_checkpoint is implemented
     total_add_actions_counter: Arc<AtomicI64>,
-
-    /// Version of the checkpoint
-    #[allow(dead_code)] // TODO: Remove when finalize_checkpoint is implemented
-    version: i64,
-
-    /// Number of parts of the checkpoint
-    #[allow(dead_code)] // TODO: Remove when finalize_checkpoint is implemented
-    parts: i64,
-
-    /// Path to table's log
-    #[allow(dead_code)] // TODO: Remove when finalize_checkpoint is implemented
-    log_root: Url,
 }
 
 impl CheckpointWriter {
     /// Creates a new CheckpointWriter with the provided checkpoint data and counters
-    fn new(
-        single_file_checkpoint_data: Option<SingleFileCheckpointData>,
-        total_actions_counter: Arc<AtomicI64>,
-        total_add_actions_counter: Arc<AtomicI64>,
-        version: i64,
-        parts: i64,
-        log_root: Url,
-    ) -> Self {
+    fn new(snapshot: Snapshot, is_v2_checkpoints_supported: bool) -> Self {
         Self {
-            single_file_checkpoint_data,
-            total_actions_counter,
-            total_add_actions_counter,
-            version,
-            parts,
-            log_root,
+            snapshot,
+            is_v2_checkpoints_supported,
+            total_actions_counter: Arc::new(AtomicI64::new(0)),
+            total_add_actions_counter: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -164,10 +141,48 @@ impl CheckpointWriter {
     /// This method takes ownership of the checkpoint data, ensuring it can
     /// only be consumed once. It returns an error if the data has already
     /// been consumed.
-    pub fn get_checkpoint_info(&mut self) -> DeltaResult<SingleFileCheckpointData> {
-        self.single_file_checkpoint_data
-            .take()
-            .ok_or_else(|| Error::generic("Checkpoint data already consumed"))
+    pub fn get_checkpoint_info(
+        &mut self,
+        engine: &dyn Engine,
+    ) -> DeltaResult<SingleFileCheckpointData> {
+        // Create counters for tracking actions
+        let total_actions_counter = Arc::new(AtomicI64::new(0));
+        let total_add_actions_counter = Arc::new(AtomicI64::new(0));
+
+        // Create iterator over actions for checkpoint data
+        let checkpoint_data = checkpoint_actions_iter(
+            self.replay_for_checkpoint_data(engine)?,
+            total_actions_counter.clone(),
+            total_add_actions_counter.clone(),
+            self.deleted_file_retention_timestamp()?,
+        );
+
+        // Chain the result of create_checkpoint_metadata_batch to the checkpoint data
+        let chained = checkpoint_data.chain(create_checkpoint_metadata_batch(
+            self.snapshot.version() as i64,
+            engine,
+            self.is_v2_checkpoints_supported,
+        )?);
+
+        // Generate checkpoint path based on builder configuration
+        // Classic naming is required for V1 checkpoints and optional for V2 checkpoints
+        // let checkpoint_path = if self.with_classic_naming || !v2_checkpoints_supported {
+        //     ParsedLogPath::new_classic_parquet_checkpoint(
+        //         self.snapshot.table_root(),
+        //         self.snapshot.version(),
+        //     )?
+        // } else {
+        //     ParsedLogPath::new_uuid_parquet_checkpoint(
+        //         self.snapshot.table_root(),
+        //         self.snapshot.version(),
+        //     )?
+        // };
+
+        // Create the checkpoint data object
+        Ok(SingleFileCheckpointData {
+            path: Url::parse("todo://checkpoint_path").unwrap(), // TODO: Replace with actual path
+            data: Box::new(chained),
+        })
     }
 
     /// Finalizes the checkpoint writing process
@@ -187,6 +202,47 @@ impl CheckpointWriter {
         _metadata: &dyn EngineData,
     ) -> DeltaResult<()> {
         todo!("Implement finalize_checkpoint");
+    }
+
+    /// Calculates the cutoff timestamp for deleted file cleanup.
+    ///
+    /// This function determines the minimum timestamp before which deleted files
+    /// will be permanently removed during VACUUM operations, based on the table's
+    /// deleted_file_retention_duration property.
+    ///
+    /// Returns the cutoff timestamp in milliseconds since epoch, matching
+    /// the remove action's deletion_timestamp format for comparison.
+    ///
+    /// The default retention period is 7 days, matching delta-spark's behavior.
+    fn deleted_file_retention_timestamp(&self) -> DeltaResult<i64> {
+        let retention_duration = self
+            .snapshot
+            .table_properties()
+            .deleted_file_retention_duration;
+
+        deleted_file_retention_timestamp_with_time(
+            retention_duration,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| Error::generic(format!("Failed to calculate system time: {}", e)))?,
+        )
+    }
+
+    /// Prepares the iterator over actions for checkpoint creation
+    ///
+    /// This method is factored out to facilitate testing and returns an iterator
+    /// over all actions to be included in the checkpoint.
+    fn replay_for_checkpoint_data(
+        &self,
+        engine: &dyn Engine,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
+        let read_schema = get_checkpoint_read_schema();
+        self.snapshot.log_segment().read_actions(
+            engine,
+            read_schema.clone(),
+            read_schema.clone(),
+            None,
+        )
     }
 }
 
@@ -226,97 +282,16 @@ impl CheckpointBuilder {
     /// This method validates the configuration against table features and creates
     /// a [`CheckpointWriter`] for the appropriate checkpoint type. It performs protocol
     /// table feature checks to determine if v2Checkpoints are supported.
-    pub fn build(self, engine: &dyn Engine) -> DeltaResult<CheckpointWriter> {
-        let v2_checkpoints_supported = self
+    pub fn build(self) -> DeltaResult<CheckpointWriter> {
+        let is_v2_checkpoints_supported = self
             .snapshot
             .table_configuration()
             .is_v2_checkpoint_supported();
 
-        // Create counters for tracking actions
-        let total_actions_counter = Arc::new(AtomicI64::new(0));
-        let total_add_actions_counter = Arc::new(AtomicI64::new(0));
-
-        // Create iterator over actions for checkpoint data
-        let checkpoint_data = checkpoint_actions_iter(
-            self.replay_for_checkpoint_data(engine)?,
-            total_actions_counter.clone(),
-            total_add_actions_counter.clone(),
-            self.deleted_file_retention_timestamp()?,
-        );
-
-        // Chain the result of create_checkpoint_metadata_batch to the checkpoint data
-        let chained = checkpoint_data.chain(create_checkpoint_metadata_batch(
-            self.snapshot.version() as i64,
-            engine,
-            v2_checkpoints_supported,
-        )?);
-
-        // Generate checkpoint path based on builder configuration
-        // Classic naming is required for V1 checkpoints and optional for V2 checkpoints
-        // let checkpoint_path = if self.with_classic_naming || !v2_checkpoints_supported {
-        //     ParsedLogPath::new_classic_parquet_checkpoint(
-        //         self.snapshot.table_root(),
-        //         self.snapshot.version(),
-        //     )?
-        // } else {
-        //     ParsedLogPath::new_uuid_parquet_checkpoint(
-        //         self.snapshot.table_root(),
-        //         self.snapshot.version(),
-        //     )?
-        // };
-
         Ok(CheckpointWriter::new(
-            Some(SingleFileCheckpointData {
-                data: Box::new(chained),
-                path: Url::parse("memory://test-table/_delta_log/checkpoint.parquet").unwrap(),
-            }),
-            total_actions_counter,
-            total_add_actions_counter,
-            self.snapshot.version() as i64,
-            1,
-            self.snapshot.log_segment().log_root.clone(),
+            self.snapshot,
+            is_v2_checkpoints_supported,
         ))
-    }
-
-    /// Prepares the iterator over actions for checkpoint creation
-    ///
-    /// This method is factored out to facilitate testing and returns an iterator
-    /// over all actions to be included in the checkpoint.
-    fn replay_for_checkpoint_data(
-        &self,
-        engine: &dyn Engine,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
-        let read_schema = get_checkpoint_read_schema();
-        self.snapshot.log_segment().read_actions(
-            engine,
-            read_schema.clone(),
-            read_schema.clone(),
-            None,
-        )
-    }
-
-    /// Calculates the cutoff timestamp for deleted file cleanup.
-    ///
-    /// This function determines the minimum timestamp before which deleted files
-    /// will be permanently removed during VACUUM operations, based on the table's
-    /// deleted_file_retention_duration property.
-    ///
-    /// Returns the cutoff timestamp in milliseconds since epoch, matching
-    /// the remove action's deletion_timestamp format for comparison.
-    ///
-    /// The default retention period is 7 days, matching delta-spark's behavior.
-    pub(crate) fn deleted_file_retention_timestamp(&self) -> DeltaResult<i64> {
-        let retention_duration = self
-            .snapshot
-            .table_properties()
-            .deleted_file_retention_duration;
-
-        deleted_file_retention_timestamp_with_time(
-            retention_duration,
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| Error::generic(format!("Failed to calculate system time: {}", e)))?,
-        )
     }
 }
 
