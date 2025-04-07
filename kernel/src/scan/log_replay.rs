@@ -343,10 +343,6 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
     type Output = ScanData;
 
     fn process_actions_batch(
-impl LogReplayProcessor for ScanLogReplayProcessor {
-    type Output = ScanData;
-
-    fn process_actions_batch(
         &mut self,
         actions_batch: Box<dyn EngineData>,
         is_log_batch: bool,
@@ -359,10 +355,7 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
 
         let mut visitor = AddRemoveDedupVisitor::new(
             &mut self.seen_file_keys,
-            &mut self.seen_file_keys,
             selection_vector,
-            self.logical_schema.clone(),
-            self.transform.clone(),
             self.logical_schema.clone(),
             self.transform.clone(),
             self.partition_filter.clone(),
