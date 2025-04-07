@@ -16,6 +16,27 @@ use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructFie
 use crate::utils::require;
 use crate::{DeltaResult, Engine, EngineData, Error, ExpressionEvaluator};
 
+/// [`ScanLogReplayProcessor`] performs log replay (processes actions) specifically for doing a table scan.
+///
+/// During a table scan, the processor reads batches of log actions (in reverse chronological order)
+/// and performs the following steps:
+///
+/// - Data Skipping: Applies a predicate-based filter (via [`DataSkippingFilter`]) to quickly skip
+///   files that are irrelevant for the query.
+/// - Partition Pruning: Uses an optional partition filter (extracted from a physical predicate)
+///   to exclude actions whose partition values do not meet the required criteria.
+/// - Action Deduplication: Leverages the [`FileActionDeduplicator`] to ensure that for each unique file
+///   (identified by its path and deletion vector unique ID), only the latest valid Add action is processed.
+/// - Transformation: Applies a built-in transformation (`add_transform`) to convert selected Add actions
+///   into [`ScanData`], the intermediate format passed to the engine.
+/// - Row Transform Passthrough: Any user-provided row-level transformation expressions (e.g. those derived
+///   from projection or filters) are preserved and passed through to the engine, which applies them as part
+///   of its scan execution logic.
+///
+/// As an implementation of [`LogReplayProcessor`], [`ScanLogReplayProcessor`] provides the `process_actions_batch`
+/// method, which applies these steps to each batch of log actions and produces a [`ScanData`] result. This result
+/// includes the transformed batch, a selection vector indicating which rows are valid, and any
+/// row-level transformation expressions that need to be applied to the selected rows.
 struct ScanLogReplayProcessor {
     partition_filter: Option<ExpressionRef>,
     data_skipping_filter: Option<DataSkippingFilter>,
@@ -300,38 +321,36 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
 
     fn process_actions_batch(
         &mut self,
-        batch: Box<dyn EngineData>,
+        actions_batch: Box<dyn EngineData>,
         is_log_batch: bool,
     ) -> DeltaResult<Self::Output> {
-        // Apply data skipping to get back a selection vector for actions that passed skipping. We
-        // will update the vector below as log replay identifies duplicates that should be ignored.
-        let selection_vector = match &self.data_skipping_filter {
-            Some(filter) => filter.apply(batch.as_ref())?,
-            None => vec![true; batch.len()],
-        };
-        assert_eq!(selection_vector.len(), batch.len());
-
-        let logical_schema = self.logical_schema.clone();
-        let transform = self.transform.clone();
-        let partition_filter = self.partition_filter.clone();
-        // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
-        let result = self.add_transform.evaluate(batch.as_ref())?;
+        // Build an initial selection vector for the batch which has had the data skipping filter
+        // applied. The selection vector is further updated by the deduplication visitor to remove
+        // rows that are not valid adds.
+        let selection_vector = self.build_selection_vector(actions_batch.as_ref())?;
+        assert_eq!(selection_vector.len(), actions_batch.len());
 
         let mut visitor = AddRemoveDedupVisitor::new(
             &mut self.seen_file_keys,
             selection_vector,
-            logical_schema,
-            transform,
-            partition_filter,
+            self.logical_schema.clone(),
+            self.transform.clone(),
+            self.partition_filter.clone(),
             is_log_batch,
         );
+        visitor.visit_rows_of(actions_batch.as_ref())?;
 
-        visitor.visit_rows_of(batch.as_ref())?;
+        // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
+        let result = self.add_transform.evaluate(actions_batch.as_ref())?;
         Ok((
             result,
             visitor.selection_vector,
             visitor.row_transform_exprs,
         ))
+    }
+
+    fn data_skipping_filter(&self) -> Option<&DataSkippingFilter> {
+        self.data_skipping_filter.as_ref()
     }
 }
 
@@ -372,10 +391,8 @@ pub(crate) fn scan_action_iter(
     transform: Option<Arc<Transform>>,
     physical_predicate: Option<(ExpressionRef, SchemaRef)>,
 ) -> impl Iterator<Item = DeltaResult<ScanData>> {
-    let log_scanner =
-        ScanLogReplayProcessor::new(engine, physical_predicate, logical_schema, transform);
-
-    ScanLogReplayProcessor::apply_to_iterator(log_scanner, action_iter)
+    ScanLogReplayProcessor::new(engine, physical_predicate, logical_schema, transform)
+        .process_actions_iter(action_iter)
 }
 
 #[cfg(test)]
