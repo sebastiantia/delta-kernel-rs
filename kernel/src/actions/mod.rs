@@ -12,7 +12,7 @@ use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
 use crate::schema::{SchemaRef, StructType};
 use crate::table_features::{
-    ReaderFeatures, WriterFeatures, SUPPORTED_READER_FEATURES, SUPPORTED_WRITER_FEATURES,
+    ReaderFeature, WriterFeature, SUPPORTED_READER_FEATURES, SUPPORTED_WRITER_FEATURES,
 };
 use crate::table_properties::TableProperties;
 use crate::utils::require;
@@ -48,6 +48,8 @@ pub(crate) const COMMIT_INFO_NAME: &str = "commitInfo";
 pub(crate) const CDC_NAME: &str = "cdc";
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const SIDECAR_NAME: &str = "sidecar";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+pub(crate) const CHECKPOINT_METADATA_NAME: &str = "checkpointMetadata";
 
 static LOG_ADD_SCHEMA: LazyLock<SchemaRef> =
     LazyLock::new(|| StructType::new([Option::<Add>::get_struct_field(ADD_NAME)]).into());
@@ -62,6 +64,7 @@ static LOG_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         Option::<CommitInfo>::get_struct_field(COMMIT_INFO_NAME),
         Option::<Cdc>::get_struct_field(CDC_NAME),
         Option::<Sidecar>::get_struct_field(SIDECAR_NAME),
+        Option::<CheckpointMetadata>::get_struct_field(CHECKPOINT_METADATA_NAME),
         // We don't support the following actions yet
         //Option::<DomainMetadata>::get_struct_field(DOMAIN_METADATA_NAME),
     ])
@@ -248,13 +251,13 @@ impl Protocol {
     }
 
     /// True if this protocol has the requested reader feature
-    pub(crate) fn has_reader_feature(&self, feature: &ReaderFeatures) -> bool {
+    pub(crate) fn has_reader_feature(&self, feature: &ReaderFeature) -> bool {
         self.reader_features()
             .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
     }
 
     /// True if this protocol has the requested writer feature
-    pub(crate) fn has_writer_feature(&self, feature: &WriterFeatures) -> bool {
+    pub(crate) fn has_writer_feature(&self, feature: &WriterFeature) -> bool {
         self.writer_features()
             .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
     }
@@ -589,6 +592,24 @@ impl Sidecar {
     }
 }
 
+/// The CheckpointMetadata action describes details about a checkpoint following the V2 specification.
+///
+/// [More info]: https://github.com/delta-io/delta/blob/master/PROTOCOL.md#checkpoint-metadata
+#[derive(Debug, Clone, PartialEq, Eq, Schema)]
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+pub(crate) struct CheckpointMetadata {
+    /// The version of the V2 spec checkpoint.
+    ///
+    /// Currently using `i64` for compatibility with other actions' representations.
+    /// Future work will address converting numeric fields to unsigned types (e.g., `u64`) where
+    /// semantically appropriate (e.g., for version, size, timestamps, etc.).
+    /// See issue #786 for tracking progress.
+    pub(crate) version: i64,
+
+    /// Map containing any additional metadata about the V2 spec checkpoint.
+    pub(crate) tags: Option<HashMap<String, String>>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -750,6 +771,21 @@ mod tests {
     }
 
     #[test]
+    fn test_checkpoint_metadata_schema() {
+        let schema = get_log_schema()
+            .project(&[CHECKPOINT_METADATA_NAME])
+            .expect("Couldn't get checkpointMetadata field");
+        let expected = Arc::new(StructType::new([StructField::nullable(
+            "checkpointMetadata",
+            StructType::new([
+                StructField::not_null("version", DataType::LONG),
+                tags_field(),
+            ]),
+        )]));
+        assert_eq!(schema, expected);
+    }
+
+    #[test]
     fn test_transaction_schema() {
         let schema = get_log_schema()
             .project(&["txn"])
@@ -838,8 +874,8 @@ mod tests {
         let protocol = Protocol::try_new(
             3,
             7,
-            Some([ReaderFeatures::V2Checkpoint]),
-            Some([ReaderFeatures::V2Checkpoint]),
+            Some([ReaderFeature::V2Checkpoint]),
+            Some([ReaderFeature::V2Checkpoint]),
         )
         .unwrap();
         assert!(protocol.ensure_read_supported().is_ok());
@@ -847,8 +883,8 @@ mod tests {
         let protocol = Protocol::try_new(
             4,
             7,
-            Some([ReaderFeatures::V2Checkpoint]),
-            Some([ReaderFeatures::V2Checkpoint]),
+            Some([ReaderFeature::V2Checkpoint]),
+            Some([ReaderFeature::V2Checkpoint]),
         )
         .unwrap();
         assert!(protocol.ensure_read_supported().is_err());
@@ -868,7 +904,7 @@ mod tests {
         let protocol = Protocol::try_new(
             3,
             7,
-            Some([ReaderFeatures::V2Checkpoint]),
+            Some([ReaderFeature::V2Checkpoint]),
             Some(&empty_features),
         )
         .unwrap();
@@ -878,7 +914,7 @@ mod tests {
             3,
             7,
             Some(&empty_features),
-            Some([WriterFeatures::V2Checkpoint]),
+            Some([WriterFeature::V2Checkpoint]),
         )
         .unwrap();
         assert!(protocol.ensure_read_supported().is_ok());
@@ -886,8 +922,8 @@ mod tests {
         let protocol = Protocol::try_new(
             3,
             7,
-            Some([ReaderFeatures::V2Checkpoint]),
-            Some([WriterFeatures::V2Checkpoint]),
+            Some([ReaderFeature::V2Checkpoint]),
+            Some([WriterFeature::V2Checkpoint]),
         )
         .unwrap();
         assert!(protocol.ensure_read_supported().is_ok());
@@ -916,9 +952,9 @@ mod tests {
             7,
             Some::<Vec<String>>(vec![]),
             Some(vec![
-                WriterFeatures::AppendOnly,
-                WriterFeatures::DeletionVectors,
-                WriterFeatures::Invariants,
+                WriterFeature::AppendOnly,
+                WriterFeature::DeletionVectors,
+                WriterFeature::Invariants,
             ]),
         )
         .unwrap();
@@ -927,8 +963,8 @@ mod tests {
         let protocol = Protocol::try_new(
             3,
             7,
-            Some([ReaderFeatures::DeletionVectors]),
-            Some([WriterFeatures::RowTracking]),
+            Some([ReaderFeature::DeletionVectors]),
+            Some([WriterFeature::RowTracking]),
         )
         .unwrap();
         assert!(protocol.ensure_write_supported().is_err());
@@ -936,24 +972,21 @@ mod tests {
 
     #[test]
     fn test_ensure_supported_features() {
-        let supported_features = [
-            ReaderFeatures::ColumnMapping,
-            ReaderFeatures::DeletionVectors,
-        ]
-        .into_iter()
-        .collect();
-        let table_features = vec![ReaderFeatures::ColumnMapping.to_string()];
+        let supported_features = [ReaderFeature::ColumnMapping, ReaderFeature::DeletionVectors]
+            .into_iter()
+            .collect();
+        let table_features = vec![ReaderFeature::ColumnMapping.to_string()];
         ensure_supported_features(&table_features, &supported_features).unwrap();
 
         // test unknown features
-        let table_features = vec![ReaderFeatures::ColumnMapping.to_string(), "idk".to_string()];
+        let table_features = vec![ReaderFeature::ColumnMapping.to_string(), "idk".to_string()];
         let error = ensure_supported_features(&table_features, &supported_features).unwrap_err();
         match error {
             Error::Unsupported(e) if e ==
-                "Unknown ReaderFeatures [\"idk\"]. Supported ReaderFeatures are [ColumnMapping, DeletionVectors]"
+                "Unknown ReaderFeature [\"idk\"]. Supported ReaderFeature are [ColumnMapping, DeletionVectors]"
             => {},
             Error::Unsupported(e) if e ==
-                "Unknown ReaderFeatures [\"idk\"]. Supported ReaderFeatures are [DeletionVectors, ColumnMapping]"
+                "Unknown ReaderFeature [\"idk\"]. Supported ReaderFeature are [DeletionVectors, ColumnMapping]"
             => {},
             _ => panic!("Expected unsupported error"),
         }
