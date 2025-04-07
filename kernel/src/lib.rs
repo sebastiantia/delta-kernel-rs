@@ -386,7 +386,7 @@ trait ExpressionHandlerExtension: ExpressionHandler {
 }
 
 // Auto-implement the extension trait for all ExpressionHandlers
-impl<T: ExpressionHandler> ExpressionHandlerExtension for T {}
+impl<T: ?Sized + ExpressionHandler> ExpressionHandlerExtension for T {}
 
 /// Provides file system related functionalities to Delta Kernel.
 ///

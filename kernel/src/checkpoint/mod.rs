@@ -14,17 +14,36 @@
 //!
 //! ## Architecture
 //!
-
-//! The API follows a builder pattern using `CheckpointBuilder`, which performs table feature
-//! detection and configuration validation. Depending on table features and builder options:
-//! - Without `v2Checkpoints`: produces a **Classic-named V1** checkpoint.
-//! - With `v2Checkpoints`: produces a **UUID-named V2** checkpoint.
-//! - With `v2Checkpoints` + `.classic_naming()`: produces a **Classic-named V2** checkpoint.
+//! ### [`CheckpointBuilder`]
+//! The entry point for checkpoint creation with the following methods:
+//! - `new(snapshot: Snapshot) -> Self` - Creates a new builder for the given table snapshot
+//! - `with_classic_naming() -> Self` - Configures the builder to use classic naming
+//! - `build() -> DeltaResult<CheckpointWriter>` - Creates the checkpoint writer
 //!
-//! The builder returns the `CheckpointWriter` which is responsible for:
-//! - Producing the correct set of actions to be written to the checkpoint file when
-//!   `.get_checkpoint_info()` is called.
-//! - Writing the _last_checkpoint file when `.finalize_checkpoint()` is called.
+//! ### [`CheckpointWriter`]
+//! Handles the actual checkpoint generation with the following methods:
+//! - `get_checkpoint_info(engine: &dyn Engine) -> DeltaResult<SingleFileCheckpointData>` -
+//!   Retrieves checkpoint data and path
+//! - `finalize_checkpoint(engine: &dyn Engine, metadata: &dyn EngineData) -> DeltaResult<()>` -
+//!   Writes the _last_checkpoint file
+//!
+//! ## Checkpoint Type Selection
+//!
+//! The checkpoint type is determined by two factors:
+//! 1. Whether the table supports the `v2Checkpoints` reader/writer feature
+//! 2. Whether classic naming is configured on the builder
+//!
+//! ```text
+//! +------------------+---------------------------+-------------------------------+
+//! | Table Feature    | Builder Configuration     | Resulting Checkpoint Type     |
+//! +==================+===========================+===============================+
+//! | No v2Checkpoints | Any                       | Single-file Classic-named V1  |
+//! +------------------+---------------------------+-------------------------------+
+//! | v2Checkpoints    | with_classic_naming(false)| Single-file UUID-named V2     |
+//! +------------------+---------------------------+-------------------------------+
+//! | v2Checkpoints    | with_classic_naming(true) | Single-file Classic-named V2  |
+//! +------------------+---------------------------+-------------------------------+
+//! ```
 //!
 //! Notes:
 //! - Multi-file V2 checkpoints are not supported yet. The API is designed to be extensible for future
@@ -61,29 +80,29 @@
 //! This module, along with its submodule `checkpoint/log_replay.rs`, provides the full
 //! API and implementation for generating checkpoints. See `checkpoint/log_replay.rs` for details
 //! on how log replay is used to filter and deduplicate actions for checkpoint creation.
-
+use crate::{
+    actions::{
+        schemas::{GetStructField, ToSchema},
+        Add, CheckpointMetadata, Metadata, Protocol, Remove, SetTransaction, Sidecar, ADD_NAME,
+        METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME, SIDECAR_NAME,
+    },
+    expressions::Scalar,
+    schema::{SchemaRef, StructType},
+    snapshot::Snapshot,
+    DeltaResult, Engine, EngineData, Error, ExpressionHandlerExtension,
+};
 use log_replay::{checkpoint_actions_iter, CheckpointData};
 use std::{
-    sync::{atomic::AtomicI64, Arc, LazyLock},
+    cell::RefCell,
+    rc::Rc,
+    sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use url::Url;
 
-use crate::actions::schemas::GetStructField;
-use crate::schema::{SchemaRef, StructType};
-use crate::{
-    actions::{
-        Add, Metadata, Protocol, Remove, SetTransaction, Sidecar, ADD_NAME, METADATA_NAME,
-        PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME, SIDECAR_NAME,
-    },
-    snapshot::Snapshot,
-    DeltaResult, Engine, EngineData, Error,
-};
-
 mod log_replay;
 
-/// This schema contains all the actions that we care to extract from log
-/// files for the purpose of creating a checkpoint.
+/// Schema for extracting relevant actions from log files during checkpoint creation
 static CHECKPOINT_READ_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     StructType::new([
         Option::<Add>::get_struct_field(ADD_NAME),
@@ -96,40 +115,40 @@ static CHECKPOINT_READ_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     .into()
 });
 
-/// This schema is used when reading actions from the Delta log
-/// to ensure we capture all necessary action types.
-#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+/// Returns the schema for reading Delta log actions during checkpoint creation
 fn get_checkpoint_read_schema() -> &'static SchemaRef {
     &CHECKPOINT_READ_SCHEMA
 }
 
-/// Contains the path and data for a single-file checkpoint.
-///
-/// This struct holds all the necessary information for writing a checkpoint file,
-/// including the destination path and the iterator over checkpoint actions.
+/// Contains the path and data for a single-file checkpoint
 pub struct SingleFileCheckpointData {
-    /// The target URL where the checkpoint file will be written
+    /// Target URL where the checkpoint file will be written
     pub path: Url,
 
     /// Iterator over checkpoint actions to be written to the file
     pub data: Box<dyn Iterator<Item = DeltaResult<CheckpointData>>>,
 }
 
-/// Writer for creating checkpoint files in Delta tables.
+/// Manages the checkpoint writing process for Delta tables
 ///
-/// The CheckpointWriter orchestrates the process of writing checkpoint data to storage.
-/// It manages the one-time consumption of checkpoint data and tracks statistics
-/// about the actions included in the checkpoint.
+/// The [`CheckpointWriter`] orchestrates creating checkpoint data and finalizing
+/// the checkpoint file. It tracks statistics about included actions and
+/// ensures checkpoint data is consumed only once.
 pub struct CheckpointWriter {
-    // The snapshot from which the checkpoint is created
+    /// The snapshot from which the checkpoint is created
     snapshot: Snapshot,
-    // Flag indicating if the table supports the `v2Checkpoints` reader/write feature
+
+    /// Whether the table supports the `v2Checkpoints` feature
     is_v2_checkpoints_supported: bool,
 
-    // TODO, i dont think arc is necessary here
-    total_actions_counter: Arc<AtomicI64>,
-    total_add_actions_counter: Arc<AtomicI64>,
+    /// Counter for total actions included in the checkpoint
+    total_actions_counter: Rc<RefCell<i64>>,
+
+    /// Counter for Add actions included in the checkpoint
+    total_add_actions_counter: Rc<RefCell<i64>>,
+
+    /// Flag to track if checkpoint data has been consumed
+    data_consumed: bool,
 }
 
 impl CheckpointWriter {
@@ -138,70 +157,81 @@ impl CheckpointWriter {
         Self {
             snapshot,
             is_v2_checkpoints_supported,
-            total_actions_counter: Arc::new(AtomicI64::new(0)),
-            total_add_actions_counter: Arc::new(AtomicI64::new(0)),
+            total_actions_counter: Rc::new(RefCell::<i64>::new(0.into())),
+            total_add_actions_counter: Rc::new(RefCell::<i64>::new(0.into())),
+            data_consumed: false,
         }
     }
 
     /// Retrieves the checkpoint data and path information
     ///
-    /// This method takes ownership of the checkpoint data, ensuring it can
-    /// only be consumed once. It returns an error if the data has already
-    /// been consumed.
+    /// This method is the core of the checkpoint generation process. It:
+    ///
+    /// 1. Ensures checkpoint data is consumed only once via `data_consumed` flag
+    /// 2. Reads actions from the log segment using the checkpoint schema
+    /// 3. Filters and deduplicates actions for the checkpoint
+    /// 4. Chains the checkpoint metadata action if writing a V2 spec checkpoint
+    ///    (i.e., if `v2Checkpoints` feature is supported by table)
+    /// 5. Generates the appropriate checkpoint path
+    ///
+    /// The returned data should be written to persistent storage by the caller
+    /// before calling `finalize_checkpoint()` otherwise data loss may occur.
+    ///
+    /// # Returns
+    /// A [`SingleFileCheckpointData`] containing the checkpoint path and action iterator
     pub fn get_checkpoint_info(
         &mut self,
         engine: &dyn Engine,
     ) -> DeltaResult<SingleFileCheckpointData> {
-        // Create counters for tracking actions
-        let total_actions_counter = Arc::new(AtomicI64::new(0));
-        let total_add_actions_counter = Arc::new(AtomicI64::new(0));
+        if self.data_consumed {
+            return Err(Error::generic("Checkpoint data has already been consumed"));
+        }
 
         // Create iterator over actions for checkpoint data
         let checkpoint_data = checkpoint_actions_iter(
             self.replay_for_checkpoint_data(engine)?,
-            total_actions_counter.clone(),
-            total_add_actions_counter.clone(),
+            self.total_actions_counter.clone(),
+            self.total_add_actions_counter.clone(),
             self.deleted_file_retention_timestamp()?,
         );
 
-        // Chain the result of create_checkpoint_metadata_batch to the checkpoint data
+        // Chain the checkpoint metadata action if using V2 checkpoints
         let chained = checkpoint_data.chain(create_checkpoint_metadata_batch(
             self.snapshot.version() as i64,
             engine,
             self.is_v2_checkpoints_supported,
         )?);
 
-        // Generate checkpoint path based on builder configuration
-        // Classic naming is required for V1 checkpoints and optional for V2 checkpoints
-        // let checkpoint_path = if self.with_classic_naming || !v2_checkpoints_supported {
-        //     ParsedLogPath::new_classic_parquet_checkpoint(
-        //         self.snapshot.table_root(),
-        //         self.snapshot.version(),
-        //     )?
-        // } else {
-        //     ParsedLogPath::new_uuid_parquet_checkpoint(
-        //         self.snapshot.table_root(),
-        //         self.snapshot.version(),
-        //     )?
-        // };
+        // Generate the appropriate checkpoint path
+        // let checkpoint_path = self.generate_checkpoint_path()?;
 
-        // Create the checkpoint data object
+        self.data_consumed = true;
+
         Ok(SingleFileCheckpointData {
-            path: Url::parse("todo://checkpoint_path").unwrap(), // TODO: Replace with actual path
+            path: Url::parse("todo!")?,
             data: Box::new(chained),
         })
     }
 
-    /// Finalizes the checkpoint writing process
+    /// Finalizes the checkpoint writing process by creating the _last_checkpoint file
     ///
-    /// This method should be only called AFTER writing all checkpoint data to
-    /// ensure proper completion of the checkpoint operation. This method
-    /// generates the `_last_checkpoint` file with metadata about the checkpoint.
+    /// The `LastCheckpointInfo` (`_last_checkpoint`) file is a metadata file that contains
+    /// information about the last checkpoint created for the table. It is used as a hint
+    /// for the engine to quickly locate the last checkpoint and avoid full log replay when
+    /// reading the table.
     ///
-    /// The metadata parameter is a single-row EngineData batch containing
-    /// {size_in_bytes: i64} for the checkpoint file. This method will extend
-    /// the EngineData batch with the remaining fields for the `_last_checkpoint`
-    /// file.
+    /// # Workflow
+    /// 0. IMPORTANT: This method must only be called AFTER successfully writing
+    ///    all checkpoint data to storage. Failure to do so may result in
+    ///    data loss.
+    /// 1. Extracts size information from the provided metadata
+    /// 2. Combines with additional metadata collected during checkpoint creation
+    /// 3. Writes the _last_checkpoint file to the log
+    ///
+    /// # Parameters
+    /// - `engine`: The engine used for writing the _last_checkpoint file
+    /// - `metadata`: A single-row [`EngineData`] batch containing:
+    ///   - `size_in_bytes` (i64): The size of the written checkpoint file
     #[allow(dead_code)] // TODO: Remove when finalize_checkpoint is implemented
     fn finalize_checkpoint(
         self,
@@ -235,10 +265,16 @@ impl CheckpointWriter {
         )
     }
 
-    /// Prepares the iterator over actions for checkpoint creation
+    /// Retrieves an iterator over all actions to be included in the checkpoint
     ///
-    /// This method is factored out to facilitate testing and returns an iterator
-    /// over all actions to be included in the checkpoint.
+    /// This method reads the relevant actions from the table's log segment using
+    /// the checkpoint schema, which filters for action types needed in checkpoints.
+    ///
+    /// The returned iterator yields tuples where:
+    /// - The first element is data in engine format
+    /// - The second element is a flag that indicates the action's source:
+    ///   - `true` if the action came from a commit file
+    ///   - `false` if the action came from a previous checkpoint file
     fn replay_for_checkpoint_data(
         &self,
         engine: &dyn Engine,
@@ -279,8 +315,8 @@ impl CheckpointBuilder {
     /// Classic naming is required for V1 checkpoints and optional for V2 checkpoints.
     /// - For V1 checkpoints, this method is a no-op.
     /// - For V2 checkpoints, the default is UUID naming unless this method is called.
-    pub fn with_classic_naming(mut self, with_classic_naming: bool) -> Self {
-        self.with_classic_naming = with_classic_naming;
+    pub fn with_classic_naming(mut self) -> Self {
+        self.with_classic_naming = true;
         self
     }
 
@@ -325,37 +361,43 @@ fn deleted_file_retention_timestamp_with_time(
     // Simple subtraction - will produce negative values if retention > now
     Ok(now_ms - retention_ms)
 }
-
-/// Create a batch with a single row containing the [`CheckpointMetadata`] action
-/// for the V2 spec checkpoint.
+/// Creates the checkpoint metadata action for V2 checkpoints.
 ///
-/// This method calls the create_one method on the expression handler to create
-/// a single-row batch with the checkpoint metadata action. The method returns:
-/// - None if the checkpoint is not a V2 checkpoint
-/// - Some(Ok(batch)) if the batch was successfully created
+/// For V2 checkpoints, this function generates a special [`CheckpointMetadata`] action
+/// that must be included in the V2 spec checkpoint file. This action contains metadata
+/// about the checkpoint, particularly its version. For V1 checkpoints, this function
+/// returns `None`, as the V1 schema does not include this action type.
+///
+/// # Implementation Details
+///
+/// The function creates a single-row [`EngineData`] batch containing only the
+/// version field of the [`CheckpointMetadata`] action. Future implementations will
+/// include additional metadata fields such as tags when map support is added.
+///
+/// The resulting [`CheckpointData`] includes a selection vector with a single `true`
+/// value, indicating this action should always be included in the checkpoint.
 fn create_checkpoint_metadata_batch(
-    _version: i64,
-    _engine: &dyn Engine,
-    _is_v2_checkpoint: bool,
+    version: i64,
+    engine: &dyn Engine,
+    is_v2_checkpoint: bool,
 ) -> DeltaResult<Option<DeltaResult<CheckpointData>>> {
-    todo!("Implement create_checkpoint_metadata_batch");
-    // if is_v2_checkpoint {
-    //     let values: &[Scalar] = &[version.into()];
-    //     let checkpoint_metadata_batch = engine.get_expression_handler().create_one(
-    //         // TODO: Include checkpointMetadata.tags when maps are supported
-    //         Arc::new(CheckpointMetadata::to_schema().project_as_struct(&["version"])?),
-    //         &values,
-    //     )?;
+    if is_v2_checkpoint {
+        let values: &[Scalar] = &[version.into()];
+        let checkpoint_metadata_batch = engine.get_expression_handler().create_one(
+            // TODO: Include checkpointMetadata.tags when maps are supported
+            Arc::new(CheckpointMetadata::to_schema().project_as_struct(&["version"])?),
+            &values,
+        )?;
 
-    //     let result = CheckpointData {
-    //         data: checkpoint_metadata_batch,
-    //         selection_vector: vec![true],
-    //     };
+        let result = CheckpointData {
+            data: checkpoint_metadata_batch,
+            selection_vector: vec![true],
+        };
 
-    //     Ok(Some(Ok(result)))
-    // } else {
-    //     Ok(None)
-    // }
+        Ok(Some(Ok(result)))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
