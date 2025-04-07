@@ -757,11 +757,12 @@ mod tests {
         Ok(())
     }
 
-    /// Tests the end-to-end processing of multiple batches with various action types.
-    /// This tests the integration of the visitors with the main iterator function.
-    /// More granular testing is performed in the visitor tests.
+    /// Tests the [`CheckpointLogReplayProcessor`] by applying the processor across
+    /// multiple batches of actions. This test ensures that the processor correctly saves state
+    /// in order to deduplicate actions across batches. More granular tests for the
+    /// [`CheckpointVisitor`] are in the above `test_checkpoint_visitor` tests.
     #[test]
-    fn test_v1_checkpoint_actions_iter_multi_batch_test() -> DeltaResult<()> {
+    fn test_checkpoint_actions_iter_multi_batch_test() -> DeltaResult<()> {
         // Setup counters
         let total_actions_counter = Rc::new(RefCell::new(0));
         let total_add_actions_counter = Rc::new(RefCell::new(0));
@@ -770,28 +771,31 @@ mod tests {
         let json_strings1: StringArray = vec![
             r#"{"protocol":{"minReaderVersion":1,"minWriterVersion":2}}"#,
             r#"{"metaData":{"id":"test2","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"c1\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c2\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c3\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":["c1","c2"],"configuration":{},"createdTime":1670892997849}}"#,
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
             r#"{"add":{"path":"file1","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,
             r#"{"add":{"path":"file2","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,
         ].into();
         // Create second batch with some duplicates and new files
         let json_strings2: StringArray = vec![
-            // Protocol and metadata should be skipped as duplicates
+            // Protocol, metadata, txn should be skipped as duplicates
             r#"{"protocol":{"minReaderVersion":1,"minWriterVersion":2}}"#,
             r#"{"metaData":{"id":"test1","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"c1\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c2\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c3\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":["c1","c2"],"configuration":{},"createdTime":1670892997849}}"#,
-            // New files
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
+            // New file
             r#"{"add":{"path":"file3","partitionValues":{},"size":800,"modificationTime":102,"dataChange":true}}"#,
             // Duplicate file should be skipped
             r#"{"add":{"path":"file1","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,            // Transaction
-            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#
+            // Unique transaction (appId) should be included
+            r#"{"txn":{"appId":"app2","version":1,"lastUpdated":123456789}}"#
         ].into();
         // Create third batch with all duplicate actions.
-        // The entire batch should be skippped as there are no selected actions to write from this batch.
+        // The *entire* batch should be skippped as there are no selected actions to write from this batch.
         let json_strings3: StringArray = vec![
             r#"{"add":{"path":"file1","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,
             r#"{"add":{"path":"file2","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,
         ].into();
         let input_batches = vec![
-            Ok((parse_json_batch(json_strings1), true)),
+            Ok((parse_json_batch(json_strings1), true)), // true = commit batch
             Ok((parse_json_batch(json_strings2), true)),
             Ok((parse_json_batch(json_strings3), true)),
         ];
@@ -804,25 +808,23 @@ mod tests {
         )
         .try_collect()?;
 
-        // Expect two batches in results (third batch should be filtered out)"
+        // Expect two batches in results (third batch should be filtered out)
         assert_eq!(results.len(), 2);
 
         // First batch should have all rows selected
         let checkpoint_data = &results[0];
         assert_eq!(
             checkpoint_data.selection_vector,
-            vec![true, true, true, true]
+            vec![true, true, true, true, true]
         );
-
-        // Second batch should have only new file and transaction selected
+        // Second batch should have only new file and unique transaction selected
         let checkpoint_data = &results[1];
         assert_eq!(
             checkpoint_data.selection_vector,
-            vec![false, false, true, false, true]
+            vec![false, false, false, true, false, true]
         );
-
-        // 6 total actions (4 from batch1 + 2 from batch2 + 0 from batch3)
-        assert_eq!(*total_actions_counter.borrow(), 6);
+        // 6 total actions (5 from batch1 + 2 from batch2 + 0 from batch3)
+        assert_eq!(*total_actions_counter.borrow(), 7);
         // 3 add actions (2 from batch1 + 1 from batch2)
         assert_eq!(*total_add_actions_counter.borrow(), 3);
 
