@@ -1,24 +1,32 @@
-//! This module implements log replay functionality specifically for checkpoint writes in delta tables.
+//! `CheckpointLogReplayProcessor` performs log replay specifically for checkpoint creation in delta tables.
 //!
-//! The primary goal is to process Delta log actions in reverse chronological order (from most recent to
-//! oldest) to produce the minimal set of actions required to reconstruct the table state in a checkpoint.
+//! During checkpoint creation, the processor reads batches of log actions (in reverse chronological order)
+//! and performs the following steps:
 //!
-//! ## Key Responsibilities
-//! - Filtering: Only the most recent protocol and metadata actions are retained, and for each transaction
-//!   (identified by its app ID), only the latest action is kept.
-//! - Deduplication: File actions are deduplicated based on file path and deletion vector unique ID so that
-//!   duplicate or obsolete actions (including remove actions) are ignored.
-//! - Retention Filtering: Tombstones older than the configured `minimum_file_retention_timestamp` are excluded.
+//! - Protocol and Metadata Filtering: Ensures that only the most recent protocol and metadata actions
+//!   are retained
+//! - Transaction Deduplication: For each transaction (identified by app ID), only the latest action
+//!   is preserved to maintain a consistent transaction history.
+//! - File Action Deduplication: Leverages the [`FileActionDeduplicator`] mechanism to ensure that
+//!   for each unique file (identified by its path and deletion vector unique ID), only the most
+//!   recent valid action is included.
+//! - Tombstone Retention Management: Excludes file removal tombstones that are older than the
+//!   configured `minimum_file_retention_timestamp`, reducing checkpoint size without compromising
+//!   table consistency.
+//! - Action Type Filtering: Excludes other action types such as commitInfo, and CDC actions that
+//!   aren't required for reconstructing table state.
 //!
-//! TODO: `CheckpointLogReplayProcessor` struct & `CheckpointData` type
-//! The module defines the CheckpointLogReplayProcessor which implements the `LogReplayProcessor` trait,
-//! as well as a [`CheckpointVisitor`] to traverse and process batches of log actions.
+//! The [`CheckpointVisitor`] implements the visitor pattern to efficiently apply these filtering
+//! rules to each action in the batch, determining which should be included in the checkpoint file.
+//! It handles deduplication of file actions, expiration of remove tombstones, and filtering of
+//! non-file actions (protocol, metadata, transaction) while excluding unnecessary action types.
 //!
-//! The processing result is encapsulated in `CheckpointData`, which includes the log data accompanied with
-//! a selection vector indicating which rows should be included in the checkpoint file.
-//!
-//! For log replay functionality used during table scans (i.e. for reading checkpoints and commit logs), refer to
-//! the `scan/log_replay.rs` module.
+//! As an implementation of `LogReplayProcessor`, `CheckpointLogReplayProcessor` provides the
+//! `process_actions_batch` method, which applies these steps to each batch of log actions and
+//! produces a `CheckpointData` result. This result encapsulates both the original batch data
+//! and a selection vector indicating which rows should be included in the checkpoint file.
+//! The [`CheckpointVisitor`] is applied within the `process_actions_batch` method to determine
+//! which rows to include by filtering protocol, metadata, transaction, and file actions.
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
