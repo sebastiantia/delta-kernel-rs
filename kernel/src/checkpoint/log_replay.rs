@@ -19,7 +19,8 @@
 //! For log replay functionality used during table scans (i.e. for reading checkpoints and commit logs), refer to
 //! the `scan/log_replay.rs` module.
 use std::collections::HashSet;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::log_replay::{
@@ -60,10 +61,14 @@ pub(crate) struct CheckpointLogReplayProcessor {
     /// Tracks file actions that have been seen during log replay to avoid duplicates.
     /// Contains (data file path, dv_unique_id) pairs as `FileActionKey` instances.
     seen_file_keys: HashSet<FileActionKey>,
+
+    // Arc<AtomicI64> is necessary because the resulting iterator from process_actions_iter()
+    // is marked with 'Send + 'static', which requires all captured state to be thread-safe.
     /// Counter for the total number of actions processed during log replay.
-    total_actions: Box<i64>,
+    total_actions: Arc<AtomicI64>,
     /// Counter for the total number of add actions processed during log replay.
-    total_add_actions: Box<i64>,
+    total_add_actions: Arc<AtomicI64>,
+
     /// Indicates whether a protocol action has been seen in the log.
     seen_protocol: bool,
     /// Indicates whether a metadata action has been seen in the log.
@@ -113,9 +118,14 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
         );
         visitor.visit_rows_of(batch.as_ref())?;
 
-        // Update counters
-        *self.total_actions += visitor.total_file_actions + visitor.total_non_file_actions;
-        *self.total_add_actions += visitor.total_add_actions;
+        // We only require eventual consistency for the counters to read the final values
+        // after all actions have been processed, so we can use relaxed ordering.
+        self.total_actions.fetch_add(
+            visitor.total_file_actions + visitor.total_non_file_actions,
+            Ordering::Relaxed,
+        );
+        self.total_add_actions
+            .fetch_add(visitor.total_add_actions, Ordering::Relaxed);
 
         // Update protocol and metadata seen flags
         self.seen_protocol = visitor.seen_protocol;
@@ -135,8 +145,8 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
 
 impl CheckpointLogReplayProcessor {
     pub(crate) fn new(
-        total_actions_counter: Box<i64>,
-        total_add_actions_counter: Box<i64>,
+        total_actions_counter: Arc<AtomicI64>,
+        total_add_actions_counter: Arc<AtomicI64>,
         minimum_file_retention_timestamp: i64,
     ) -> Self {
         Self {
@@ -162,8 +172,8 @@ impl CheckpointLogReplayProcessor {
 #[allow(unused)] // TODO: Remove once checkpoint_v1 API is implemented
 pub(crate) fn checkpoint_actions_iter(
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send + 'static,
-    total_actions_counter: Box<i64>, // Boxed to avoid lifetime complications
-    total_add_actions_counter: Box<i64>, // Boxed to avoid lifetime complications
+    total_actions_counter: Arc<AtomicI64>,
+    total_add_actions_counter: Arc<AtomicI64>,
     minimum_file_retention_timestamp: i64,
 ) -> impl Iterator<Item = DeltaResult<CheckpointData>> + Send + 'static {
     CheckpointLogReplayProcessor::new(
@@ -753,8 +763,8 @@ mod tests {
     #[test]
     fn test_v1_checkpoint_actions_iter_multi_batch_test() -> DeltaResult<()> {
         // Setup counters
-        let total_actions_counter = Box::new(0);
-        let total_add_actions_counter = Box::new(0);
+        let total_actions_counter = Arc::new(AtomicI64::new(0));
+        let total_add_actions_counter = Arc::new(AtomicI64::new(0));
 
         // Create first batch with protocol, metadata, and some files
         let json_strings1: StringArray = vec![
@@ -812,9 +822,9 @@ mod tests {
         );
 
         // 6 total actions (4 from batch1 + 2 from batch2 + 0 from batch3)
-        assert_eq!(*total_actions_counter, 6);
+        assert_eq!(total_actions_counter.load(Ordering::Relaxed), 6);
         // 3 add actions (2 from batch1 + 1 from batch2)
-        assert_eq!(*total_add_actions_counter, 3);
+        assert_eq!(total_add_actions_counter.load(Ordering::Relaxed), 3);
 
         Ok(())
     }
