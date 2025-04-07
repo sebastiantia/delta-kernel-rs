@@ -239,7 +239,7 @@ pub(crate) trait LogReplayProcessor: Sized {
     /// Processes a batch of actions and returns the filtered results.
     ///
     /// # Arguments
-    /// - `actions_batch` - A reference to an [`EngineData`] instance representing a batch of actions.
+    /// - `actions_batch` - A boxed [`EngineData`] instance representing a batch of actions.
     /// - `is_log_batch` - `true` if the batch originates from a commit log, `false` if from a checkpoint.
     ///
     /// Returns a [`DeltaResult`] containing the processor’s output, which includes only selected actions.

@@ -49,6 +49,29 @@ struct ScanLogReplayProcessor {
     seen_file_keys: HashSet<FileActionKey>,
 }
 
+impl ScanLogReplayProcessor {
+    /// Create a new [`ScanLogReplayProcessor`] instance
+    fn new(
+        engine: &dyn Engine,
+        physical_predicate: Option<(ExpressionRef, SchemaRef)>,
+        logical_schema: SchemaRef,
+        transform: Option<Arc<Transform>>,
+    ) -> Self {
+        Self {
+            partition_filter: physical_predicate.as_ref().map(|(e, _)| e.clone()),
+            data_skipping_filter: DataSkippingFilter::new(engine, physical_predicate),
+            add_transform: engine.evaluation_handler().new_expression_evaluator(
+                get_log_add_schema().clone(),
+                get_add_transform_expr(),
+                SCAN_ROW_DATATYPE.clone(),
+            ),
+            seen_file_keys: Default::default(),
+            logical_schema,
+            transform,
+        }
+    }
+}
+
 /// A visitor that deduplicates a stream of add and remove actions into a stream of valid adds. Log
 /// replay visits actions newest-first, so once we've seen a file action for a given (path, dvId)
 /// pair, we should ignore all subsequent (older) actions for that same (path, dvId) pair. If the
@@ -351,29 +374,6 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
 
     fn data_skipping_filter(&self) -> Option<&DataSkippingFilter> {
         self.data_skipping_filter.as_ref()
-    }
-}
-
-impl ScanLogReplayProcessor {
-    /// Create a new [`ScanLogReplayProcessor`] instance
-    fn new(
-        engine: &dyn Engine,
-        physical_predicate: Option<(ExpressionRef, SchemaRef)>,
-        logical_schema: SchemaRef,
-        transform: Option<Arc<Transform>>,
-    ) -> Self {
-        Self {
-            partition_filter: physical_predicate.as_ref().map(|(e, _)| e.clone()),
-            data_skipping_filter: DataSkippingFilter::new(engine, physical_predicate),
-            add_transform: engine.get_expression_handler().get_evaluator(
-                get_log_add_schema().clone(),
-                get_add_transform_expr(),
-                SCAN_ROW_DATATYPE.clone(),
-            ),
-            seen_file_keys: Default::default(),
-            logical_schema,
-            transform,
-        }
     }
 }
 
