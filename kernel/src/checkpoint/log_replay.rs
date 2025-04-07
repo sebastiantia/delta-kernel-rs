@@ -16,10 +16,17 @@
 //! - Action Type Filtering: Excludes other action types such as commitInfo, and CDC actions that
 //!   aren't required for reconstructing table state.
 //!
+//! The [`CheckpointVisitor`] implements the visitor pattern to efficiently apply these filtering
+//! rules to each action in the batch, determining which should be included in the checkpoint file.
+//! It handles deduplication of file actions, expiration of remove tombstones, and filtering of
+//! non-file actions (protocol, metadata, transaction) while excluding unnecessary action types.
+//!
 //! As an implementation of [`LogReplayProcessor`], [`CheckpointLogReplayProcessor`] provides the
 //! `process_actions_batch` method, which applies these steps to each batch of log actions and
 //! produces a [`CheckpointData`] result. This result encapsulates both the original batch data
 //! and a selection vector indicating which rows should be included in the checkpoint file.
+//! The [`CheckpointVisitor`] is applied within the `process_actions_batch` method to determine
+//! which rows to include by filtering protocol, metadata, transaction, and file actions.
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
