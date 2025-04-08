@@ -16,7 +16,7 @@
 //!
 //! ### [`CheckpointWriter`]
 //! Handles the actual checkpoint data generation and writing process. It is created via the
-//! [`Table::checkpoint()`] method and provides the following methods:
+//! [`Table::checkpoint()`] method and provides the following APIs:
 //! - `new(snapshot: Snapshot) -> Self` - Creates a new writer for the given table snapshot
 //! - `get_checkpoint_info(engine: &dyn Engine) -> DeltaResult<SingleFileCheckpointData>` -
 //!   Returns the checkpoint data and path information
@@ -90,6 +90,8 @@ use std::{
 use url::Url;
 
 mod log_replay;
+#[cfg(test)]
+mod tests;
 
 /// Schema for extracting relevant actions from log files during checkpoint creation
 static CHECKPOINT_READ_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
@@ -140,16 +142,16 @@ pub(crate) struct SingleFileCheckpointData {
 #[allow(unused)] // TODO(seb): Make pub for roll-out
 pub(crate) struct CheckpointWriter {
     /// The snapshot from which the checkpoint is created
-    snapshot: Snapshot,
+    pub(crate) snapshot: Snapshot,
     /// Note: Rc<RefCell<i64>> provides shared mutability for our counters, allowing the
     /// returned actions iterator from `.get_checkpoint_info()` to update the counters,
     /// and the `finalize_checkpoint()` method to read them...
     /// Counter for total actions included in the checkpoint
-    total_actions_counter: Rc<RefCell<i64>>,
+    pub(crate) total_actions_counter: Rc<RefCell<i64>>,
     /// Counter for Add actions included in the checkpoint
-    total_add_actions_counter: Rc<RefCell<i64>>,
+    pub(crate) total_add_actions_counter: Rc<RefCell<i64>>,
     /// Flag to track if checkpoint data has been consumed
-    data_consumed: bool,
+    pub(crate) data_consumed: bool,
 }
 
 impl CheckpointWriter {
@@ -201,7 +203,7 @@ impl CheckpointWriter {
         );
 
         // Chain the checkpoint metadata action if using V2 checkpoints
-        let chained = checkpoint_data.chain(create_checkpoint_metadata_batch(
+        let chained = checkpoint_data.chain(self.create_checkpoint_metadata_batch(
             self.snapshot.version() as i64,
             engine,
             is_v2_checkpoints_supported,
@@ -246,6 +248,57 @@ impl CheckpointWriter {
         _metadata: &dyn EngineData,
     ) -> DeltaResult<()> {
         todo!("Implement finalize_checkpoint");
+    }
+
+    /// Creates the checkpoint metadata action for V2 checkpoints.
+    ///
+    /// For V2 checkpoints, this function generates a special [`CheckpointMetadata`] action
+    /// that must be included in the V2 spec checkpoint file. This action contains metadata
+    /// about the checkpoint, particularly its version. For V1 checkpoints, this function
+    /// returns `None`, as the V1 schema does not include this action type.
+    ///
+    /// # Implementation Details
+    ///
+    /// The function creates a single-row [`EngineData`] batch containing only the
+    /// version field of the `CheckpointMetadata` action. Future implementations will
+    /// include additional metadata fields such as tags when map support is added.
+    ///
+    /// The resulting [`CheckpointData`] includes a selection vector with a single `true`
+    /// value, indicating this action should always be included in the checkpoint.
+    fn create_checkpoint_metadata_batch(
+        &self,
+        version: i64,
+        engine: &dyn Engine,
+        is_v2_checkpoint: bool,
+    ) -> DeltaResult<Option<DeltaResult<CheckpointData>>> {
+        if !is_v2_checkpoint {
+            return Ok(None);
+        }
+        let values: &[Scalar] = &[version.into()];
+        // Create the nested schema structure for `CheckpointMetadata`
+        // Note: We cannot use `CheckpointMetadata::to_schema()` as it would include
+        // the 'tags' field which we're not supporting yet due to the lack of map support.
+        let schema = Arc::new(StructType::new([StructField::not_null(
+            "checkpointMetadata",
+            DataType::struct_type([StructField::not_null("version", DataType::LONG)]),
+        )]));
+
+        let checkpoint_metadata_batch = engine.evaluation_handler().create_one(schema, values)?;
+
+        let result = CheckpointData {
+            data: checkpoint_metadata_batch,
+            selection_vector: vec![true], // Always include this action
+        };
+
+        // Safe to mutably borrow counter here as the iterator has not yet been returned from
+        // `get_checkpoint_info()`. The iterator is the only other consumer of the counter.
+        let mut counter_ref = self
+            .total_actions_counter
+            .try_borrow_mut()
+            .map_err(|e| Error::generic(format!("Failed to borrow mutably: {}", e)))?;
+        *counter_ref += 1;
+
+        Ok(Some(Ok(result)))
     }
 
     /// Calculates the cutoff timestamp for deleted file cleanup.
@@ -319,54 +372,15 @@ fn deleted_file_retention_timestamp_with_time(
     // Simple subtraction - will produce negative values if retention > now
     Ok(now_ms - retention_ms)
 }
-/// Creates the checkpoint metadata action for V2 checkpoints.
-///
-/// For V2 checkpoints, this function generates a special [`CheckpointMetadata`] action
-/// that must be included in the V2 spec checkpoint file. This action contains metadata
-/// about the checkpoint, particularly its version. For V1 checkpoints, this function
-/// returns `None`, as the V1 schema does not include this action type.
-///
-/// # Implementation Details
-///
-/// The function creates a single-row [`EngineData`] batch containing only the
-/// version field of the `CheckpointMetadata` action. Future implementations will
-/// include additional metadata fields such as tags when map support is added.
-///
-/// The resulting [`CheckpointData`] includes a selection vector with a single `true`
-/// value, indicating this action should always be included in the checkpoint.
-fn create_checkpoint_metadata_batch(
-    version: i64,
-    engine: &dyn Engine,
-    is_v2_checkpoint: bool,
-) -> DeltaResult<Option<DeltaResult<CheckpointData>>> {
-    if !is_v2_checkpoint {
-        return Ok(None);
-    }
-    let values: &[Scalar] = &[version.into()];
-    // Create the nested schema structure for `CheckpointMetadata`
-    // Note: We cannot use `CheckpointMetadata::to_schema()` as it would include
-    // the 'tags' field which we're not supporting yet due to the lack of map support.
-    let schema = Arc::new(StructType::new([StructField::not_null(
-        "checkpointMetadata",
-        DataType::struct_type([StructField::not_null("version", DataType::LONG)]),
-    )]));
-
-    let checkpoint_metadata_batch = engine.evaluation_handler().create_one(schema, values)?;
-
-    let result = CheckpointData {
-        data: checkpoint_metadata_batch,
-        selection_vector: vec![true], // Always include this action
-    };
-
-    Ok(Some(Ok(result)))
-}
 
 #[cfg(test)]
 mod unit_tests {
     use super::*;
     use crate::engine::{arrow_data::ArrowEngineData, sync::SyncEngine};
+    use crate::Table;
     use arrow_53::{array::RecordBatch, datatypes::Field};
     use delta_kernel::arrow::array::create_array;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use crate::arrow::array::{ArrayRef, StructArray};
@@ -397,12 +411,21 @@ mod unit_tests {
         Ok(())
     }
 
+    fn create_test_snapshot(engine: &dyn Engine) -> DeltaResult<Snapshot> {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/app-txn-no-checkpoint/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let table = Table::new(url);
+        table.snapshot(engine, None)
+    }
+
     #[test]
     fn test_create_checkpoint_metadata_batch_when_v2_checkpoints_is_supported() -> DeltaResult<()> {
         let engine = SyncEngine::new();
         let version = 10;
+        let writer = CheckpointWriter::new(create_test_snapshot(&engine)?);
+
         // Test with is_v2_checkpoint = true
-        let result = create_checkpoint_metadata_batch(version, &engine, true)?;
+        let result = writer.create_checkpoint_metadata_batch(version, &engine, true)?;
         assert!(result.is_some());
         let checkpoint_data = result.unwrap()?;
 
@@ -436,6 +459,9 @@ mod unit_tests {
 
         assert_eq!(*record_batch, expected);
 
+        // Verify counter was incremented
+        assert_eq!(*writer.total_actions_counter.borrow(), 1);
+
         Ok(())
     }
 
@@ -443,11 +469,17 @@ mod unit_tests {
     fn test_create_checkpoint_metadata_batch_when_v2_checkpoints_not_supported() -> DeltaResult<()>
     {
         let engine = SyncEngine::new();
+        let writer = CheckpointWriter::new(create_test_snapshot(&engine)?);
+
         // Test with is_v2_checkpoint = false
-        let result = create_checkpoint_metadata_batch(10, &engine, false)?;
+        let result = writer.create_checkpoint_metadata_batch(10, &engine, false)?;
 
         // No checkpoint metadata action should be created for V1 checkpoints
         assert!(result.is_none());
+
+        // Verify counter was not incremented
+        assert_eq!(*writer.total_actions_counter.borrow(), 0);
+
         Ok(())
     }
 }
