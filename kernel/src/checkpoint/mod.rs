@@ -12,7 +12,7 @@
 //!    maintaining backwards compatibility by using classic naming that legacy readers can recognize.
 //!
 //! For more information on the V1/V2 specifications, see the following protocol section:
-//! https://github.com/delta-io/delta/blob/master/PROTOCOL.md#checkpoint-specs
+//! <https://github.com/delta-io/delta/blob/master/PROTOCOL.md#checkpoint-specs>
 //!
 //! ### [`CheckpointWriter`]
 //! Handles the actual checkpoint data generation and writing process. It is created via the
@@ -110,7 +110,8 @@ fn get_checkpoint_read_schema() -> &'static SchemaRef {
 }
 
 /// Contains the path and data for a single-file checkpoint
-pub struct SingleFileCheckpointData {
+#[allow(unused)] // TODO(seb): Make pub for roll-out
+pub(crate) struct SingleFileCheckpointData {
     /// Target URL where the checkpoint file will be written
     pub path: Url,
 
@@ -136,7 +137,8 @@ pub struct SingleFileCheckpointData {
 /// 2. Applies selection and deduplication logic with the `CheckpointLogReplayProcessor`
 /// 3. Tracks counts of included actions for to be written to the _last_checkpoint file
 /// 5. Chains the [`CheckpointMetadata`] action to the actions iterator (for V2 checkpoints)
-pub struct CheckpointWriter {
+#[allow(unused)] // TODO(seb): Make pub for roll-out
+pub(crate) struct CheckpointWriter {
     /// The snapshot from which the checkpoint is created
     snapshot: Snapshot,
     /// Note: Rc<RefCell<i64>> provides shared mutability for our counters, allowing the
@@ -152,7 +154,7 @@ pub struct CheckpointWriter {
 
 impl CheckpointWriter {
     /// Creates a new CheckpointWriter with the provided checkpoint data and counters
-    pub fn new(snapshot: Snapshot) -> Self {
+    pub(crate) fn new(snapshot: Snapshot) -> Self {
         Self {
             snapshot,
             total_actions_counter: Rc::new(RefCell::<i64>::new(0.into())),
@@ -177,7 +179,8 @@ impl CheckpointWriter {
     ///
     /// # Returns
     /// A [`SingleFileCheckpointData`] containing the checkpoint path and action iterator
-    pub fn get_checkpoint_info(
+    #[allow(unused)] // TODO(seb): Make pub for roll-out
+    pub(crate) fn get_checkpoint_info(
         &mut self,
         engine: &dyn Engine,
     ) -> DeltaResult<SingleFileCheckpointData> {
@@ -236,7 +239,7 @@ impl CheckpointWriter {
     /// - `engine`: The engine used for writing the _last_checkpoint file
     /// - `metadata`: A single-row [`EngineData`] batch containing:
     ///   - `size_in_bytes` (i64): The size of the written checkpoint file
-    #[allow(dead_code)] // TODO: Remove when finalize_checkpoint is implemented
+    #[allow(unused)] // TODO(seb): Make pub for roll-out
     fn finalize_checkpoint(
         self,
         _engine: &dyn Engine,
@@ -336,24 +339,26 @@ fn create_checkpoint_metadata_batch(
     engine: &dyn Engine,
     is_v2_checkpoint: bool,
 ) -> DeltaResult<Option<DeltaResult<CheckpointData>>> {
-    if is_v2_checkpoint {
-        let values: &[Scalar] = &[version.into()];
-        let schema = Arc::new(StructType::new([StructField::not_null(
-            "checkpointMetadata",
-            DataType::struct_type([StructField::not_null("version", DataType::LONG)]),
-        )]));
-
-        let checkpoint_metadata_batch = engine.evaluation_handler().create_one(schema, values)?;
-
-        let result = CheckpointData {
-            data: checkpoint_metadata_batch,
-            selection_vector: vec![true],
-        };
-
-        Ok(Some(Ok(result)))
-    } else {
-        Ok(None)
+    if !is_v2_checkpoint {
+        return Ok(None);
     }
+    let values: &[Scalar] = &[version.into()];
+    // Create the nested schema structure for `CheckpointMetadata`
+    // Note: We cannot use `CheckpointMetadata::to_schema()` as it would include
+    // the 'tags' field which we're not supporting yet due to the lack of map support.
+    let schema = Arc::new(StructType::new([StructField::not_null(
+        "checkpointMetadata",
+        DataType::struct_type([StructField::not_null("version", DataType::LONG)]),
+    )]));
+
+    let checkpoint_metadata_batch = engine.evaluation_handler().create_one(schema, values)?;
+
+    let result = CheckpointData {
+        data: checkpoint_metadata_batch,
+        selection_vector: vec![true], // Always include this action
+    };
+
+    Ok(Some(Ok(result)))
 }
 
 #[cfg(test)]
@@ -441,7 +446,7 @@ mod unit_tests {
         // Test with is_v2_checkpoint = false
         let result = create_checkpoint_metadata_batch(10, &engine, false)?;
 
-        // Check that the result is None for V1 checkpoints
+        // No checkpoint metadata action should be created for V1 checkpoints
         assert!(result.is_none());
         Ok(())
     }
