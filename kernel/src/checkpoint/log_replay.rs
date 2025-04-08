@@ -85,8 +85,7 @@ pub(crate) struct CheckpointVisitor<'seen> {
 #[allow(unused)]
 impl CheckpointVisitor<'_> {
     // These index positions correspond to the order of columns defined in
-    // `selected_column_names_and_types()`, and are used to extract file key information
-    // for deduplication purposes
+    // `selected_column_names_and_types()`
     const ADD_PATH_INDEX: usize = 0; // Position of "add.path" in getters
     const ADD_DV_START_INDEX: usize = 1; // Start position of add deletion vector columns
     const REMOVE_PATH_INDEX: usize = 4; // Position of "remove.path" in getters
@@ -125,14 +124,14 @@ impl CheckpointVisitor<'_> {
 
     /// Determines if a remove action tombstone has expired and should be excluded from the checkpoint.
     ///
-    /// A remove action includes a timestamp indicating when the deletion occurred. Physical files  
-    /// are deleted lazily after a user-defined expiration time. Remove actions are kept to allow
-    /// concurrent readers to read snapshots at older versions. A remove action remains as a tombstone
-    /// in a checkpoint file until it expires, which happens when the deletion timestamp is less than
-    /// or equal to the minimum file retention timestamp.
+    /// A remove action includes a deletion_timestamp indicating when the deletion occurred. Physical
+    /// files are deleted lazily after a user-defined expiration time. Remove actions are kept to allow
+    /// concurrent readers to read snapshots at older versions.
     ///
-    /// Note: When remove.deletion_timestamp is not present (defaulting to 0), the remove action
-    /// will be excluded from the checkpoint file as it will be treated as expired.
+    /// Tombstone expiration rules:
+    /// - If deletion_timestamp <= minimum_file_retention_timestamp: Expired (exclude)
+    /// - If deletion_timestamp > minimum_file_retention_timestamp: Valid (include)
+    /// - If deletion_timestamp is missing: Defaults to 0, treated as expired (exclude)
     fn is_expired_tombstone<'a>(&self, i: usize, getter: &'a dyn GetData<'a>) -> DeltaResult<bool> {
         // Ideally this should never be zero, but we are following the same behavior as Delta
         // Spark and the Java Kernel.
@@ -266,11 +265,12 @@ impl CheckpointVisitor<'_> {
         Ok(Some(()))
     }
 
-    /// Determines if a row in the batch should be included in the checkpoint by checking
-    /// if it contains any valid action type for the checkpoint.
+    /// Determines if a row in the batch should be included in the checkpoint.
     ///
-    /// Note: This method checks each action type in sequence, and prioritizes file actions as
-    /// they appear most frequently, followed by transaction, protocol, and metadata actions.
+    /// This method efficiently checks each action type using short-circuit evaluation
+    /// through the `.or()` chain. As soon as any check returns `Some(())`, the remaining
+    /// checks are skipped. Actions are checked in order of expected frequency (file actions first)
+    /// to optimize performance in typical workloads.
     ///
     /// Returns Ok(true) if the row should be included in the checkpoint.
     /// Returns Ok(false) if the row should be skipped.
@@ -332,9 +332,7 @@ impl RowVisitor for CheckpointVisitor<'_> {
         );
 
         for i in 0..row_count {
-            if self.selection_vector[i] {
-                self.selection_vector[i] = self.is_valid_action(i, getters)?;
-            }
+            self.selection_vector[i] = self.is_valid_action(i, getters)?;
         }
         Ok(())
     }
