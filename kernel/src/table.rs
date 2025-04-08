@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use url::Url;
 
-use crate::checkpoint::CheckpointBuilder;
+use crate::checkpoint::CheckpointWriter;
 use crate::snapshot::Snapshot;
 use crate::table_changes::TableChanges;
 use crate::transaction::Transaction;
@@ -99,35 +99,20 @@ impl Table {
         )
     }
 
-    /// Creates a [`CheckpointBuilder`] for generating table checkpoints.
+    /// Creates a [`CheckpointWriter`] for generating table checkpoints at the specified version.
     ///
-    /// Checkpoints are compact representations of the table state that improve reading performance
-    /// by providing a consolidated view without requiring full log replay.
+    /// The checkpoint type is automatically determined based on the table's feature support:
+    /// - Tables supporting `v2Checkpoints` feature -> Creates a Classic-named V2 checkpoint
+    /// - Tables not supporting `v2Checkpoints` feature -> Creates a Classic-named V1 checkpoint
     ///
-    /// # Checkpoint Types
-    ///
-    /// The type of checkpoint created depends on table features and builder configuration:
-    ///
-    /// 1. Classic V1 Checkpoint: Created automatically for tables without v2Checkpoints feature support.
-    ///    - Uses classic naming format (`<version>.checkpoint.parquet`)
-    ///    - Created regardless of `with_classic_naming` setting
-    ///
-    /// 2. Classic V2 Checkpoint* Created when tables support v2Checkpoints feature AND
-    ///    `with_classic_naming(true)` is specified.
-    ///    - Uses classic naming format (`<version>.checkpoint.parquet`)
-    ///    - Includes additional V2 metadata
-    ///
-    /// 3. **UUID V2 Checkpoint**: Created when tables support v2Checkpoints feature AND
-    ///    `with_classic_naming(false)` is used (default).
-    ///    - Uses UUID naming format (`<version>.<uuid>.checkpoint.parquet`)
-    ///    - Includes additional V2 metadata
-    ///    - Recommended for most tables that support v2Checkpoints
+    /// See the [`crate::checkpoint`] module documentation for more details on checkpoint types
+    /// and the overall checkpoint process.    
     pub fn checkpoint(
         &self,
         engine: &dyn Engine,
         version: Option<Version>,
-    ) -> DeltaResult<CheckpointBuilder> {
-        Ok(CheckpointBuilder::new(self.snapshot(engine, version)?))
+    ) -> DeltaResult<CheckpointWriter> {
+        Ok(CheckpointWriter::new(self.snapshot(engine, version)?))
     }
 
     /// Create a new write transaction for this table.
