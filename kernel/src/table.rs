@@ -107,7 +107,8 @@ impl Table {
     ///
     /// See the [`crate::checkpoint`] module documentation for more details on checkpoint types
     /// and the overall checkpoint process.    
-    pub fn checkpoint(
+    #[allow(unused)] // TODO(seb) Make pub for roll-out
+    pub(crate) fn checkpoint(
         &self,
         engine: &dyn Engine,
         version: Option<Version>,
