@@ -1,5 +1,5 @@
 use object_store::{memory::InMemory, path::Path, ObjectStore};
-use std::{i64::MAX, sync::Arc};
+use std::sync::Arc;
 use test_utils::delta_path_for_version;
 use url::Url;
 
@@ -76,7 +76,7 @@ fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
             Action::Remove(Remove {
                 path: "fake_path_1".into(),
                 data_change: true,
-                deletion_timestamp: Some(MAX), // Ensure the remove action is not expired
+                deletion_timestamp: Some(i64::MAX), // Ensure the remove action is not expired
                 ..Default::default()
             }),
         ],
@@ -224,7 +224,7 @@ fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
             Action::Remove(Remove {
                 path: "fake_path_1".into(),
                 data_change: true,
-                deletion_timestamp: Some(MAX), // Ensure the remove action is not expired
+                deletion_timestamp: Some(i64::MAX), // Ensure the remove action is not expired
                 ..Default::default()
             }),
         ],
