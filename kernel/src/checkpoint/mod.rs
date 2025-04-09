@@ -42,7 +42,7 @@
 //!   implemented in the future. The current implementation only supports classic-named V2 checkpoints.
 //! - Multi-file V2 checkpoints are not supported yet. The API is designed to be extensible for future
 //!   multi-file support, but the current implementation only supports single-file checkpoints.
-//! - Multi-file V1 checkpoints are DEPRECATED.
+//! - Multi-file V1 checkpoints are DEPRECATED and UNSAFE.
 //!
 //! ## Example: Writing a classic-named V1/V2 checkpoint (depending on `v2Checkpoints` feature support)
 //!
@@ -69,21 +69,20 @@
 //! This module, along with its submodule `checkpoint/log_replay.rs`, provides the full
 //! API and implementation for generating checkpoints. See `checkpoint/log_replay.rs` for details
 //! on how log replay is used to filter and deduplicate actions for checkpoint creation.
-use crate::{
-    actions::{
-        schemas::GetStructField, Add, Metadata, Protocol, Remove, SetTransaction, Sidecar,
-        ADD_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME, SIDECAR_NAME,
-    },
-    expressions::Scalar,
-    path::ParsedLogPath,
-    schema::{DataType, SchemaRef, StructField, StructType},
-    snapshot::Snapshot,
-    DeltaResult, Engine, EngineData, Error, EvaluationHandlerExtension,
+use crate::actions::{
+    schemas::GetStructField, Add, Metadata, Protocol, Remove, SetTransaction, Sidecar, ADD_NAME,
+    METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME, SIDECAR_NAME,
 };
+use crate::expressions::Scalar;
+use crate::path::ParsedLogPath;
+use crate::schema::{DataType, SchemaRef, StructField, StructType};
+use crate::snapshot::Snapshot;
+#[cfg(doc)]
+use crate::{actions::CheckpointMetadata, table::Table};
+use crate::{DeltaResult, Engine, EngineData, Error, EvaluationHandlerExtension};
 use log_replay::{checkpoint_actions_iter, CheckpointData};
+use std::sync::atomic::AtomicI64;
 use std::{
-    cell::RefCell,
-    rc::Rc,
     sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -143,13 +142,13 @@ pub struct SingleFileCheckpointData {
 pub struct CheckpointWriter {
     /// Reference to the snapshot of the table being checkpointed
     pub(crate) snapshot: Arc<Snapshot>,
-    /// Note: Rc<RefCell<i64>> provides shared mutability for our counters, allowing the
+    /// Note: Arc<AtomicI64>> provides shared mutability for our counters, allowing the
     /// returned actions iterator from `.checkpoint_data()` to update the counters,
     /// and the `finalize()` method to read them...
     /// Counter for total actions included in the checkpoint
-    pub(crate) total_actions_counter: Rc<RefCell<i64>>,
+    pub(crate) total_actions_counter: Arc<AtomicI64>,
     /// Counter for Add actions included in the checkpoint
-    pub(crate) total_add_actions_counter: Rc<RefCell<i64>>,
+    pub(crate) total_add_actions_counter: Arc<AtomicI64>,
     /// Flag to track if checkpoint data has been consumed
     pub(crate) data_consumed: bool,
 }
@@ -159,8 +158,8 @@ impl CheckpointWriter {
     pub(crate) fn new(snapshot: Arc<Snapshot>) -> Self {
         Self {
             snapshot,
-            total_actions_counter: Rc::new(RefCell::<i64>::new(0.into())),
-            total_add_actions_counter: Rc::new(RefCell::<i64>::new(0.into())),
+            total_actions_counter: Arc::new(AtomicI64::new(0)),
+            total_add_actions_counter: Arc::new(AtomicI64::new(0)),
             data_consumed: false,
         }
     }
@@ -249,7 +248,8 @@ impl CheckpointWriter {
     /// - `engine`: The engine used for writing the _last_checkpoint file
     /// - `metadata`: A single-row [`EngineData`] batch containing:
     ///   - `size_in_bytes` (i64): The size of the written checkpoint file
-    #[allow(unused)] // TODO(seb): Make pub for roll-out
+    #[allow(unused)]
+    // TODO(seb): Implement finalize & then make pub. Pub(crate) for docs
     fn finalize(self, _engine: &dyn Engine, _metadata: &dyn EngineData) -> DeltaResult<()> {
         todo!("Implement finalize");
     }
@@ -294,13 +294,10 @@ impl CheckpointWriter {
             selection_vector: vec![true], // Always include this action
         };
 
-        // Safe to mutably borrow counter here as the iterator has not yet been returned from
-        // `checkpoint_data()`. The iterator is the only other consumer of the counter.
-        let mut counter_ref = self
-            .total_actions_counter
-            .try_borrow_mut()
-            .map_err(|e| Error::generic(format!("Failed to borrow mutably: {}", e)))?;
-        *counter_ref += 1;
+        // Ordering does not matter as there are no other threads modifying this counter
+        // at this time (since we have not yet returned the iterator which performs the action counting)
+        self.total_actions_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         Ok(Some(Ok(result)))
     }
@@ -362,6 +359,7 @@ mod unit_tests {
     use arrow_53::{array::RecordBatch, datatypes::Field};
     use delta_kernel::arrow::array::create_array;
     use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use crate::arrow::array::{ArrayRef, StructArray};
@@ -441,7 +439,7 @@ mod unit_tests {
         assert_eq!(*record_batch, expected);
 
         // Verify counter was incremented
-        assert_eq!(*writer.total_actions_counter.borrow(), 1);
+        assert_eq!(writer.total_actions_counter.load(Ordering::Relaxed), 1);
 
         Ok(())
     }
@@ -459,7 +457,7 @@ mod unit_tests {
         assert!(result.is_none());
 
         // Verify counter was not incremented
-        assert_eq!(*writer.total_actions_counter.borrow(), 0);
+        assert_eq!(writer.total_actions_counter.load(Ordering::Relaxed), 0);
 
         Ok(())
     }

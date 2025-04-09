@@ -29,10 +29,9 @@
 //! and a selection vector indicating which rows should be included in the checkpoint file.
 //! The [`CheckpointVisitor`] is applied within the `process_actions_batch` method to determine
 //! which rows to include by filtering protocol, metadata, transaction, and file actions.
-use std::cell::RefCell;
 use std::collections::HashSet;
-use std::rc::Rc;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::log_replay::{
@@ -74,13 +73,11 @@ pub(crate) struct CheckpointLogReplayProcessor {
     /// Contains (data file path, dv_unique_id) pairs as `FileActionKey` instances.
     seen_file_keys: HashSet<FileActionKey>,
 
-    // Rc<RefCell<i64>> provides shared mutability for our counters, allowing both the
+    // Arc<AtomicI64> provides shared mutability for our counters, allowing both the
     // iterator to update the values during processing and the caller to observe the final
-    // counts afterward. Note that this approach is not thread-safe and only works in
-    // single-threaded contexts, which means the iterator cannot be sent across thread
-    // boundaries (no Send trait).
-    total_actions: Rc<RefCell<i64>>,
-    total_add_actions: Rc<RefCell<i64>>,
+    // counts afterward.
+    total_actions: Arc<AtomicI64>,
+    total_add_actions: Arc<AtomicI64>,
 
     /// Indicates whether a protocol action has been seen in the log.
     seen_protocol: bool,
@@ -131,10 +128,14 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
         );
         visitor.visit_rows_of(batch.as_ref())?;
 
-        // Update the total actions and add actions counters
-        *self.total_actions.borrow_mut() +=
-            visitor.total_file_actions + visitor.total_non_file_actions;
-        *self.total_add_actions.borrow_mut() += visitor.total_add_actions;
+        // Update the total actions and add actions counters. Relaxed ordering is
+        // sufficient here as we only care about the total count and not the order of updates.
+        self.total_actions.fetch_add(
+            visitor.total_file_actions + visitor.total_non_file_actions,
+            Ordering::Relaxed,
+        );
+        self.total_add_actions
+            .fetch_add(visitor.total_add_actions, Ordering::Relaxed);
 
         // Update protocol and metadata seen flags
         self.seen_protocol = visitor.seen_protocol;
@@ -154,8 +155,8 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
 
 impl CheckpointLogReplayProcessor {
     pub(crate) fn new(
-        total_actions_counter: Rc<RefCell<i64>>,
-        total_add_actions_counter: Rc<RefCell<i64>>,
+        total_actions_counter: Arc<AtomicI64>,
+        total_add_actions_counter: Arc<AtomicI64>,
         minimum_file_retention_timestamp: i64,
     ) -> Self {
         Self {
@@ -181,8 +182,8 @@ impl CheckpointLogReplayProcessor {
 #[allow(unused)] // TODO: Remove once API is implemented
 pub(crate) fn checkpoint_actions_iter(
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
-    total_actions_counter: Rc<RefCell<i64>>,
-    total_add_actions_counter: Rc<RefCell<i64>>,
+    total_actions_counter: Arc<AtomicI64>,
+    total_add_actions_counter: Arc<AtomicI64>,
     minimum_file_retention_timestamp: i64,
 ) -> impl Iterator<Item = DeltaResult<CheckpointData>> {
     CheckpointLogReplayProcessor::new(
@@ -769,8 +770,8 @@ mod tests {
     #[test]
     fn test_checkpoint_actions_iter_multi_batch_test() -> DeltaResult<()> {
         // Setup counters
-        let total_actions_counter = Rc::new(RefCell::new(0));
-        let total_add_actions_counter = Rc::new(RefCell::new(0));
+        let total_actions_counter = Arc::new(AtomicI64::new(0));
+        let total_add_actions_counter = Arc::new(AtomicI64::new(0));
 
         // Create first batch with protocol, metadata, and some files
         let json_strings1: StringArray = vec![
@@ -829,9 +830,9 @@ mod tests {
             vec![false, false, false, true, false, true]
         );
         // 6 total actions (5 from batch1 + 2 from batch2 + 0 from batch3)
-        assert_eq!(*total_actions_counter.borrow(), 7);
+        assert_eq!(total_actions_counter.load(Ordering::Relaxed), 7);
         // 3 add actions (2 from batch1 + 1 from batch2)
-        assert_eq!(*total_add_actions_counter.borrow(), 3);
+        assert_eq!(total_add_actions_counter.load(Ordering::Relaxed), 3);
 
         Ok(())
     }
