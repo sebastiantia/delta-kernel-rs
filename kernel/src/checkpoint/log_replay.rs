@@ -66,8 +66,8 @@ impl HasSelectionVector for CheckpointData {
 /// trait that filters log segment actions for inclusion in a V1 spec checkpoint file.
 ///
 /// It processes each action batch via the `process_actions_batch` method, using the
-/// [`CheckpointVisitor`] to map each [`EngineData`] batch into a [`CheckpointData`]
-/// instance that reflect only the necessary actions for the checkpoint.
+/// [`CheckpointVisitor`] to build an accompanying selection vector indicating which actions 
+/// should be included in the checkpoint.
 pub(crate) struct CheckpointLogReplayProcessor {
     /// Tracks file actions that have been seen during log replay to avoid duplicates.
     /// Contains (data file path, dv_unique_id) pairs as `FileActionKey` instances.
