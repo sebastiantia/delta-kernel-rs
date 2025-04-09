@@ -18,9 +18,9 @@
 //! Handles the actual checkpoint data generation and writing process. It is created via the
 //! [`Table::checkpoint()`] method and provides the following APIs:
 //! - `new(snapshot: Snapshot) -> Self` - Creates a new writer for the given table snapshot
-//! - `get_checkpoint_info(engine: &dyn Engine) -> DeltaResult<SingleFileCheckpointData>` -
+//! - `checkpoint_data(engine: &dyn Engine) -> DeltaResult<SingleFileCheckpointData>` -
 //!   Returns the checkpoint data and path information
-//! - `finalize_checkpoint(engine: &dyn Engine, metadata: &dyn EngineData) -> DeltaResult<()>` -
+//! - `finalize(engine: &dyn Engine, metadata: &dyn EngineData) -> DeltaResult<()>` -
 //!   Writes the _last_checkpoint file after the checkpoint data has been written
 //!
 //! ## Checkpoint Type Selection
@@ -56,25 +56,19 @@
 //! let mut writer = table.checkpoint(&engine, Some(2))?;
 //!
 //! // Retrieve checkpoint data
-//! let checkpoint_data = writer.get_checkpoint_info()?;
+//! let checkpoint_data = writer.checkpoint_data()?;
 //!
 //! /* Write checkpoint data to file and collect metadata about the write */
 //! /* The implementation of the write is storage-specific and not shown */
 //! /* IMPORTANT: All data must be written before finalizing the checkpoint */
 //!
 //! // Finalize the checkpoint by writing the _last_checkpoint file
-//! writer.finalize_checkpoint(&engine, &checkpoint_metadata)?;
+//! writer.finalize(&engine, &checkpoint_metadata)?;
 //! ```
 //!
 //! This module, along with its submodule `checkpoint/log_replay.rs`, provides the full
 //! API and implementation for generating checkpoints. See `checkpoint/log_replay.rs` for details
 //! on how log replay is used to filter and deduplicate actions for checkpoint creation.
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    sync::{Arc, LazyLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
 use crate::{
     actions::{
         schemas::GetStructField, Add, Metadata, Protocol, Remove, SetTransaction, Sidecar,
@@ -87,8 +81,13 @@ use crate::{
     DeltaResult, Engine, EngineData, Error, EvaluationHandlerExtension,
 };
 use log_replay::{checkpoint_actions_iter, CheckpointData};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{Arc, LazyLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use url::Url;
-
 
 mod log_replay;
 #[cfg(test)]
@@ -113,7 +112,7 @@ fn get_checkpoint_actions_schema() -> &'static SchemaRef {
 }
 
 /// Represents a single-file checkpoint, including the data to write and the target path.
-/// 
+///
 /// TODO(seb): Rename to `CheckpointData` once `FilteredEngineData` is introduced.
 pub struct SingleFileCheckpointData {
     /// The URL where the checkpoint file should be written.
@@ -123,7 +122,6 @@ pub struct SingleFileCheckpointData {
     pub data: Box<dyn Iterator<Item = DeltaResult<CheckpointData>>>,
 }
 
-
 /// Manages the checkpoint writing process for Delta tables
 ///
 /// The [`CheckpointWriter`] orchestrates creating checkpoint data and finalizing
@@ -132,10 +130,10 @@ pub struct SingleFileCheckpointData {
 ///
 /// # Usage
 /// 1. Create via [`Table::checkpoint()`]
-/// 2. Call [`CheckpointWriter::get_checkpoint_info()`] to obtain [`SingleFileCheckpointData`],
+/// 2. Call [`CheckpointWriter::checkpoint_data()`] to obtain [`SingleFileCheckpointData`],
 ///    containing the checkpoint path and data iterator
 /// 3. Write the checkpoint data to storage (implementation-specific)
-/// 4. Call [`CheckpointWriter::finalize_checkpoint()`] to create the _last_checkpoint file
+/// 4. Call [`CheckpointWriter::finalize()`] to create the _last_checkpoint file
 ///
 /// # Internal Process
 /// 1. Reads relevant actions from the log segment using the checkpoint read schema
@@ -146,8 +144,8 @@ pub struct CheckpointWriter {
     /// Reference to the snapshot of the table being checkpointed
     pub(crate) snapshot: Arc<Snapshot>,
     /// Note: Rc<RefCell<i64>> provides shared mutability for our counters, allowing the
-    /// returned actions iterator from `.get_checkpoint_info()` to update the counters,
-    /// and the `finalize_checkpoint()` method to read them...
+    /// returned actions iterator from `.checkpoint_data()` to update the counters,
+    /// and the `finalize()` method to read them...
     /// Counter for total actions included in the checkpoint
     pub(crate) total_actions_counter: Rc<RefCell<i64>>,
     /// Counter for Add actions included in the checkpoint
@@ -179,26 +177,34 @@ impl CheckpointWriter {
     /// 5. Generates the appropriate checkpoint path
     ///
     /// The returned data should be written to persistent storage by the caller
-    /// before calling `finalize_checkpoint()` otherwise data loss may occur.
+    /// before calling `finalize()` otherwise data loss may occur.
     ///
     /// # Returns
     /// A [`SingleFileCheckpointData`] containing the checkpoint path and action iterator
-    #[allow(unused)] // TODO(seb): Make pub for roll-out
-    pub(crate) fn get_checkpoint_info(
+    pub fn checkpoint_data(
         &mut self,
         engine: &dyn Engine,
     ) -> DeltaResult<SingleFileCheckpointData> {
         if self.data_consumed {
             return Err(Error::generic("Checkpoint data has already been consumed"));
         }
+
         let is_v2_checkpoints_supported = self
             .snapshot
             .table_configuration()
             .is_v2_checkpoint_supported();
 
+        let read_schema = get_checkpoint_actions_schema();
+        let actions = self.snapshot.log_segment().read_actions(
+            engine,
+            read_schema.clone(),
+            read_schema.clone(),
+            None,
+        );
+
         // Create iterator over actions for checkpoint data
         let checkpoint_data = checkpoint_actions_iter(
-            self.replay_for_checkpoint_data(engine)?,
+            actions?,
             self.total_actions_counter.clone(),
             self.total_add_actions_counter.clone(),
             self.deleted_file_retention_timestamp()?,
@@ -244,12 +250,8 @@ impl CheckpointWriter {
     /// - `metadata`: A single-row [`EngineData`] batch containing:
     ///   - `size_in_bytes` (i64): The size of the written checkpoint file
     #[allow(unused)] // TODO(seb): Make pub for roll-out
-    fn finalize_checkpoint(
-        self,
-        _engine: &dyn Engine,
-        _metadata: &dyn EngineData,
-    ) -> DeltaResult<()> {
-        todo!("Implement finalize_checkpoint");
+    fn finalize(self, _engine: &dyn Engine, _metadata: &dyn EngineData) -> DeltaResult<()> {
+        todo!("Implement finalize");
     }
 
     /// Creates the checkpoint metadata action for V2 checkpoints.
@@ -293,7 +295,7 @@ impl CheckpointWriter {
         };
 
         // Safe to mutably borrow counter here as the iterator has not yet been returned from
-        // `get_checkpoint_info()`. The iterator is the only other consumer of the counter.
+        // `checkpoint_data()`. The iterator is the only other consumer of the counter.
         let mut counter_ref = self
             .total_actions_counter
             .try_borrow_mut()
@@ -324,29 +326,6 @@ impl CheckpointWriter {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(|e| Error::generic(format!("Failed to calculate system time: {}", e)))?,
-        )
-    }
-
-    /// Retrieves an iterator over all actions to be included in the checkpoint
-    ///
-    /// This method reads the relevant actions from the table's log segment using
-    /// the checkpoint schema, which filters for action types needed in checkpoints.
-    ///
-    /// The returned iterator yields tuples where:
-    /// - The first element is data in engine format
-    /// - The second element is a flag that indicates the action's source:
-    ///   - `true` if the action came from a commit file
-    ///   - `false` if the action came from a previous checkpoint file
-    fn replay_for_checkpoint_data(
-        &self,
-        engine: &dyn Engine,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
-        let read_schema = get_checkpoint_actions_schema();
-        self.snapshot.log_segment().read_actions(
-            engine,
-            read_schema.clone(),
-            read_schema.clone(),
-            None,
         )
     }
 }

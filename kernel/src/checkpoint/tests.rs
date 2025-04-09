@@ -101,7 +101,7 @@ fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
     let mut writer = table.checkpoint(&engine, None)?;
-    let checkpoint_data = writer.get_checkpoint_info(&engine)?;
+    let checkpoint_data = writer.checkpoint_data(&engine)?;
     let mut data_iter = checkpoint_data.data;
 
     // Verify the checkpoint file path is the latest version by default.
@@ -179,7 +179,7 @@ fn test_v1_checkpoint_specific_version() -> DeltaResult<()> {
     let table = Table::new(table_root);
     // Specify version 0 for checkpoint
     let mut writer = table.checkpoint(&engine, Some(0))?;
-    let checkpoint_data = writer.get_checkpoint_info(&engine)?;
+    let checkpoint_data = writer.checkpoint_data(&engine)?;
     let mut data_iter = checkpoint_data.data;
 
     // Verify the checkpoint file path is the specified version.
@@ -248,7 +248,7 @@ fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
     let mut writer = table.checkpoint(&engine, None)?;
-    let checkpoint_data = writer.get_checkpoint_info(&engine)?;
+    let checkpoint_data = writer.checkpoint_data(&engine)?;
     let mut data_iter = checkpoint_data.data;
 
     // Verify the checkpoint file path is the latest version by default.
