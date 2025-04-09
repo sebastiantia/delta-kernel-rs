@@ -1,18 +1,19 @@
 //! The [`CheckpointLogReplayProcessor`] implements specialized log replay logic for creating
 //! checkpoint files. It processes log files in reverse chronological order (newest to oldest)
-//! and selects only the minimal set of actions needed to represent the table state at a given version.
+//! and selects the set of actions to include in a checkpoint for a specific version.
 //!
-//! ## Filtering Process
+//! ## Actions Included for Checkpointing
 //!
 //! For checkpoint creation, this processor applies several filtering and deduplication
 //! steps to each batch of log actions:
 //!
-//! 1. **Protocol and Metadata**: Retains only the latest protocol and metadata actions.
-//! 2. **Transactions**: Keeps the most recent action for each unique transaction (by app ID).
-//! 3. **File Actions**: Deduplicates file actions (add/remove) by path and deletion vector ID,
-//!    keeping only the latest valid action.
-//! 4. **Tombstones**: Excludes expired remove actions older than `minimum_file_retention_timestamp`.
-//! 5. **Action Types**: Filters out irrelevant action types such as commitInfo, CDC, and sidecar actions.
+//! 1. **Protocol and Metadata**: Retains exactly one of each - keeping only the latest protocol
+//!    and metadata actions.
+//! 2. **Txn Actions**: Keeps exactly one `txn` action for each unique app ID, always selecting
+//!    the latest one encountered.
+//! 3. **File Actions**: Resolves file actions to produce the latest state of the table, keeping
+//!    the most recent valid add actions and unexpired remove actions (tombstones) that are newer
+//!    than `minimum_file_retention_timestamp`.
 //!
 //! ## Architecture
 //!
@@ -41,7 +42,7 @@ use crate::schema::{column_name, ColumnName, ColumnNamesAndTypes, DataType};
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error};
 
-/// TODO!(seb): Change this to `type CheckpointData = FilteredEngineData` once available.
+/// TODO!(seb): Replace `CheckpointData` with `FilteredEngineData` when available
 ///
 /// [`CheckpointData`] represents a batch of actions filtered for checkpoint creation.
 /// It wraps a single engine data batch and a corresponding selection vector indicating
