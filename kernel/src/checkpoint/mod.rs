@@ -69,6 +69,12 @@
 //! This module, along with its submodule `checkpoint/log_replay.rs`, provides the full
 //! API and implementation for generating checkpoints. See `checkpoint/log_replay.rs` for details
 //! on how log replay is used to filter and deduplicate actions for checkpoint creation.
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{Arc, LazyLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use crate::{
     actions::{
         schemas::GetStructField, Add, Metadata, Protocol, Remove, SetTransaction, Sidecar,
@@ -81,20 +87,15 @@ use crate::{
     DeltaResult, Engine, EngineData, Error, EvaluationHandlerExtension,
 };
 use log_replay::{checkpoint_actions_iter, CheckpointData};
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    sync::{Arc, LazyLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
 use url::Url;
+
 
 mod log_replay;
 #[cfg(test)]
 mod tests;
 
-/// Schema for extracting relevant actions from log files during checkpoint creation
-static CHECKPOINT_READ_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
+/// Schema for extracting relevant actions from log files for checkpoint creation
+static CHECKPOINT_ACTIONS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     StructType::new([
         Option::<Add>::get_struct_field(ADD_NAME),
         Option::<Remove>::get_struct_field(REMOVE_NAME),
@@ -106,20 +107,22 @@ static CHECKPOINT_READ_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     .into()
 });
 
-/// Returns the schema for reading Delta log actions during checkpoint creation
-fn get_checkpoint_read_schema() -> &'static SchemaRef {
-    &CHECKPOINT_READ_SCHEMA
+/// Returns the schema for reading Delta log actions for checkpoint creation
+fn get_checkpoint_actions_schema() -> &'static SchemaRef {
+    &CHECKPOINT_ACTIONS_SCHEMA
 }
 
-/// Contains the path and data for a single-file checkpoint
-#[allow(unused)] // TODO(seb): Make pub for roll-out
-pub(crate) struct SingleFileCheckpointData {
-    /// Target URL where the checkpoint file will be written
+/// Represents a single-file checkpoint, including the data to write and the target path.
+/// 
+/// TODO(seb): Rename to `CheckpointData` once `FilteredEngineData` is introduced.
+pub struct SingleFileCheckpointData {
+    /// The URL where the checkpoint file should be written.
     pub path: Url,
 
-    /// Iterator over checkpoint actions to be written to the file
+    /// An iterator over the checkpoint data to be written to the file.
     pub data: Box<dyn Iterator<Item = DeltaResult<CheckpointData>>>,
 }
+
 
 /// Manages the checkpoint writing process for Delta tables
 ///
@@ -127,22 +130,21 @@ pub(crate) struct SingleFileCheckpointData {
 /// the checkpoint file. It tracks statistics about included actions and
 /// ensures checkpoint data is consumed only once.
 ///
-/// # Usage Flow
-/// 1. Create via `Table::checkpoint()`
-/// 2. Call `get_checkpoint_info()` to obtain the [`SingleFileCheckpointData`]
-///    containing the path and action iterator for the checkpoint
+/// # Usage
+/// 1. Create via [`Table::checkpoint()`]
+/// 2. Call [`CheckpointWriter::get_checkpoint_info()`] to obtain [`SingleFileCheckpointData`],
+///    containing the checkpoint path and data iterator
 /// 3. Write the checkpoint data to storage (implementation-specific)
-/// 4. Call `finalize_checkpoint()` to create the _last_checkpoint file
+/// 4. Call [`CheckpointWriter::finalize_checkpoint()`] to create the _last_checkpoint file
 ///
 /// # Internal Process
 /// 1. Reads relevant actions from the log segment using the checkpoint read schema
 /// 2. Applies selection and deduplication logic with the `CheckpointLogReplayProcessor`
 /// 3. Tracks counts of included actions for to be written to the _last_checkpoint file
 /// 5. Chains the [`CheckpointMetadata`] action to the actions iterator (for V2 checkpoints)
-#[allow(unused)] // TODO(seb): Make pub for roll-out
-pub(crate) struct CheckpointWriter {
-    /// The snapshot from which the checkpoint is created
-    pub(crate) snapshot: Snapshot,
+pub struct CheckpointWriter {
+    /// Reference to the snapshot of the table being checkpointed
+    pub(crate) snapshot: Arc<Snapshot>,
     /// Note: Rc<RefCell<i64>> provides shared mutability for our counters, allowing the
     /// returned actions iterator from `.get_checkpoint_info()` to update the counters,
     /// and the `finalize_checkpoint()` method to read them...
@@ -156,7 +158,7 @@ pub(crate) struct CheckpointWriter {
 
 impl CheckpointWriter {
     /// Creates a new CheckpointWriter with the provided checkpoint data and counters
-    pub(crate) fn new(snapshot: Snapshot) -> Self {
+    pub(crate) fn new(snapshot: Arc<Snapshot>) -> Self {
         Self {
             snapshot,
             total_actions_counter: Rc::new(RefCell::<i64>::new(0.into())),
@@ -339,7 +341,7 @@ impl CheckpointWriter {
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
-        let read_schema = get_checkpoint_read_schema();
+        let read_schema = get_checkpoint_actions_schema();
         self.snapshot.log_segment().read_actions(
             engine,
             read_schema.clone(),
@@ -411,11 +413,11 @@ mod unit_tests {
         Ok(())
     }
 
-    fn create_test_snapshot(engine: &dyn Engine) -> DeltaResult<Snapshot> {
+    fn create_test_snapshot(engine: &dyn Engine) -> DeltaResult<Arc<Snapshot>> {
         let path = std::fs::canonicalize(PathBuf::from("./tests/data/app-txn-no-checkpoint/"));
         let url = url::Url::from_directory_path(path.unwrap()).unwrap();
         let table = Table::new(url);
-        table.snapshot(engine, None)
+        Ok(Arc::new(table.snapshot(engine, None)?))
     }
 
     #[test]

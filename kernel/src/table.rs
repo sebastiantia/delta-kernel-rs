@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::ops::Deref;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use url::Url;
 
@@ -107,13 +108,12 @@ impl Table {
     ///
     /// See the [`crate::checkpoint`] module documentation for more details on checkpoint types
     /// and the overall checkpoint process.    
-    #[allow(unused)] // TODO(seb) Make pub for roll-out
-    pub(crate) fn checkpoint(
+    pub fn checkpoint(
         &self,
         engine: &dyn Engine,
         version: Option<Version>,
     ) -> DeltaResult<CheckpointWriter> {
-        Ok(CheckpointWriter::new(self.snapshot(engine, version)?))
+        Ok(CheckpointWriter::new(Arc::new(self.snapshot(engine, version)?)))
     }
 
     /// Create a new write transaction for this table.

@@ -49,11 +49,11 @@ use crate::{DeltaResult, EngineData, Error};
 /// It wraps a single engine data batch and a corresponding selection vector indicating
 /// which rows should be written to the checkpoint file.
 #[allow(unused)] // TODO(seb): Make pub for roll-out
-pub(crate) struct CheckpointData {
+pub struct CheckpointData {
     /// The original engine data containing the actions
-    pub(crate) data: Box<dyn EngineData>,
+    pub data: Box<dyn EngineData>,
     /// Boolean vector indicating which rows should be included in the checkpoint
-    pub(crate) selection_vector: Vec<bool>,
+    pub selection_vector: Vec<bool>,
 }
 
 impl HasSelectionVector for CheckpointData {
