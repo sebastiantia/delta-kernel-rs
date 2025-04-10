@@ -26,40 +26,17 @@
 //!   1. Creates a visitor with the current deduplication state
 //!   2. Applies the visitor to filter actions in the batch
 //!   3. Updates counters and state for cross-batch deduplication
-//!   4. Produces a [`CheckpointData`] result which includes a selection vector indicating which
+//!   4. Produces a [`FilteredEngineData`] result which includes a selection vector indicating which
 //!      actions should be included in the checkpoint file
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, LazyLock};
-
-use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
-use crate::log_replay::{
-    FileActionDeduplicator, FileActionKey, HasSelectionVector, LogReplayProcessor,
-};
+use crate::engine_data::{FilteredEngineData, GetData, RowVisitor, TypedGetData as _};
+use crate::log_replay::{FileActionDeduplicator, FileActionKey, LogReplayProcessor};
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::schema::{column_name, ColumnName, ColumnNamesAndTypes, DataType};
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error};
-
-/// TODO!(seb): Replace `CheckpointData` with `FilteredEngineData` when available
-///
-/// [`CheckpointData`] represents a batch of actions filtered for checkpoint creation.
-/// It wraps a single engine data batch and a corresponding selection vector indicating
-/// which rows should be written to the checkpoint file.
-pub(crate) struct CheckpointData {
-    /// The original engine data containing the actions
-    #[allow(dead_code)] // TODO: Remove once checkpoint_v1 API is implemented
-    data: Box<dyn EngineData>,
-    /// Boolean vector indicating which rows should be included in the checkpoint
-    selection_vector: Vec<bool>,
-}
-
-impl HasSelectionVector for CheckpointData {
-    /// Returns true if any row in the selection vector is marked as selected
-    fn has_selected_rows(&self) -> bool {
-        self.selection_vector.contains(&true)
-    }
-}
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 /// The [`CheckpointLogReplayProcessor`] is an implementation of the [`LogReplayProcessor`]
 /// trait that filters log segment actions for inclusion in a V1 spec checkpoint file.
@@ -71,13 +48,13 @@ pub(crate) struct CheckpointLogReplayProcessor {
     /// Tracks file actions that have been seen during log replay to avoid duplicates.
     /// Contains (data file path, dv_unique_id) pairs as `FileActionKey` instances.
     seen_file_keys: HashSet<FileActionKey>,
-
     // Arc<AtomicI64> provides shared mutability for our counters, allowing both the
     // iterator to update the values during processing and the caller to observe the final
-    // counts afterward.
+    // counts afterward. The counters are i64 to match the `_last_checkpoint` file schema.
+    // Tracks the total number of actions included in the checkpoint file.
     total_actions: Arc<AtomicI64>,
+    // Tracks the total number of add actions included in the checkpoint file.
     total_add_actions: Arc<AtomicI64>,
-
     /// Indicates whether a protocol action has been seen in the log.
     seen_protocol: bool,
     /// Indicates whether a metadata action has been seen in the log.
@@ -89,7 +66,7 @@ pub(crate) struct CheckpointLogReplayProcessor {
 }
 
 impl LogReplayProcessor for CheckpointLogReplayProcessor {
-    type Output = CheckpointData;
+    type Output = FilteredEngineData;
 
     /// This function is applied to each batch of actions read from the log during
     /// log replay in reverse chronological order (from most recent to least recent),
@@ -127,8 +104,9 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
         );
         visitor.visit_rows_of(batch.as_ref())?;
 
-        // Update the total actions and add actions counters. Relaxed ordering is
-        // sufficient here as we only care about the total count and not the order of updates.
+        // Update the total actions and add actions counters. Relaxed ordering is sufficient
+        // here as we only care about the total count when writing the _last_checkpoint file.
+        // (the ordering is not important for correctness)
         self.total_actions.fetch_add(
             visitor.file_actions_count + visitor.non_file_actions_count,
             Ordering::Relaxed,
@@ -140,7 +118,7 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
         self.seen_protocol = visitor.seen_protocol;
         self.seen_metadata = visitor.seen_metadata;
 
-        Ok(CheckpointData {
+        Ok(FilteredEngineData {
             data: batch,
             selection_vector: visitor.selection_vector,
         })
@@ -154,14 +132,14 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
 
 impl CheckpointLogReplayProcessor {
     pub(crate) fn new(
-        total_actions_counter: Arc<AtomicI64>,
-        total_add_actions_counter: Arc<AtomicI64>,
+        total_actions: Arc<AtomicI64>,
+        total_add_actions: Arc<AtomicI64>,
         minimum_file_retention_timestamp: i64,
     ) -> Self {
         Self {
             seen_file_keys: Default::default(),
-            total_actions: total_actions_counter,
-            total_add_actions: total_add_actions_counter,
+            total_actions: total_actions,
+            total_add_actions: total_add_actions,
             seen_protocol: false,
             seen_metadata: false,
             seen_txns: Default::default(),
@@ -181,13 +159,13 @@ impl CheckpointLogReplayProcessor {
 #[allow(unused)] // TODO: Remove once API is implemented
 pub(crate) fn checkpoint_actions_iter(
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
-    total_actions_counter: Arc<AtomicI64>,
-    total_add_actions_counter: Arc<AtomicI64>,
+    total_actions: Arc<AtomicI64>,
+    total_add_actions: Arc<AtomicI64>,
     minimum_file_retention_timestamp: i64,
-) -> impl Iterator<Item = DeltaResult<CheckpointData>> {
+) -> impl Iterator<Item = DeltaResult<FilteredEngineData>> {
     CheckpointLogReplayProcessor::new(
-        total_actions_counter,
-        total_add_actions_counter,
+        total_actions,
+        total_add_actions,
         minimum_file_retention_timestamp,
     )
     .process_actions_iter(action_iter)
@@ -740,6 +718,7 @@ mod tests {
 
         Ok(())
     }
+
     /// Tests the [`CheckpointLogReplayProcessor`] by applying the processor across
     /// multiple batches of actions. This test ensures that the processor correctly saves state
     /// in order to deduplicate actions across batches. More granular tests for the
@@ -747,8 +726,8 @@ mod tests {
     #[test]
     fn test_checkpoint_actions_iter_multi_batch_test() -> DeltaResult<()> {
         // Setup counters
-        let total_actions_counter = Arc::new(AtomicI64::new(0));
-        let total_add_actions_counter = Arc::new(AtomicI64::new(0));
+        let total_actions = Arc::new(AtomicI64::new(0));
+        let total_add_actions = Arc::new(AtomicI64::new(0));
 
         // Create first batch with protocol, metadata, and some files
         let json_strings1: StringArray = vec![
@@ -785,8 +764,8 @@ mod tests {
 
         let results: Vec<_> = checkpoint_actions_iter(
             input_batches.into_iter(),
-            total_actions_counter.clone(),
-            total_add_actions_counter.clone(),
+            total_actions.clone(),
+            total_add_actions.clone(),
             0,
         )
         .try_collect()?;
@@ -807,9 +786,9 @@ mod tests {
             vec![false, false, false, true, false, true]
         );
         // 6 total actions (5 from batch1 + 2 from batch2 + 0 from batch3)
-        assert_eq!(total_actions_counter.load(Ordering::Relaxed), 7);
+        assert_eq!(total_actions.load(Ordering::Relaxed), 7);
         // 3 add actions (2 from batch1 + 1 from batch2)
-        assert_eq!(total_add_actions_counter.load(Ordering::Relaxed), 3);
+        assert_eq!(total_add_actions.load(Ordering::Relaxed), 3);
 
         Ok(())
     }
