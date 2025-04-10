@@ -1,14 +1,21 @@
+use crate::{
+    actions::{Add, Metadata, Protocol, Remove},
+    engine::{
+        arrow_data::ArrowEngineData,
+        default::{executor::tokio::TokioBackgroundExecutor, DefaultEngine},
+    },
+    utils::test_utils::Action,
+    DeltaResult, EngineData, Table,
+};
+use arrow_53::{
+    array::{Int64Array, RecordBatch},
+    datatypes::{DataType, Field, Schema},
+};
 use object_store::{memory::InMemory, path::Path, ObjectStore};
+use serde_json::{from_slice, json, Value};
 use std::sync::Arc;
 use test_utils::delta_path_for_version;
 use url::Url;
-
-use crate::{
-    actions::{Add, Metadata, Protocol, Remove},
-    engine::default::{executor::tokio::TokioBackgroundExecutor, DefaultEngine},
-    utils::test_utils::Action,
-    DeltaResult, Table,
-};
 
 /// TODO(seb): Merge copies and move to `test_utils`
 /// Create an in-memory store and return the store and the URL for the store's _delta_log directory.
@@ -42,6 +49,45 @@ fn write_commit_to_store(
         .expect("create tokio runtime")
         .block_on(async { store.put(&Path::from(commit_path), content.into()).await })?;
 
+    Ok(())
+}
+
+/// Creates a metadata batch with size information for checkpoint
+fn create_checkpoint_metadata_batch(size_in_bytes: i64) -> DeltaResult<impl EngineData> {
+    let schema = Schema::new(vec![Field::new("sizeInBytes", DataType::Int64, false)]);
+    let size_array = Int64Array::from(vec![size_in_bytes]);
+    let record_batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(size_array)])?;
+    Ok(ArrowEngineData::new(record_batch))
+}
+
+/// Reads the `_last_checkpoint.json` file from storage
+fn read_last_checkpoint_file(store: &Arc<InMemory>) -> DeltaResult<Value> {
+    let path = Path::from("_delta_log/_last_checkpoint.json");
+    let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+    let byte_data = rt.block_on(async {
+        let data = store.get(&path).await?;
+        data.bytes().await
+    })?;
+    Ok(from_slice(&byte_data)?)
+}
+
+/// Helper to verify the contents of the `_last_checkpoint` file
+fn assert_last_checkpoint_contents(
+    store: &Arc<InMemory>,
+    expected_version: u64,
+    expected_size: u64,
+    expected_num_add_files: u64,
+    expected_size_in_bytes: i64,
+) -> DeltaResult<()> {
+    let last_checkpoint_data = read_last_checkpoint_file(store)?;
+    let expected_data = json!({
+        "version": expected_version,
+        "size": expected_size,
+        "parts": 1,
+        "sizeInBytes": expected_size_in_bytes,
+        "numOfAddFiles": expected_num_add_files,
+    });
+    assert_eq!(last_checkpoint_data, expected_data);
     Ok(())
 }
 
@@ -110,9 +156,6 @@ fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
         Url::parse("memory:///_delta_log/00000000000000000002.checkpoint.parquet")?
     );
 
-    // Recall that the batches of actions are returned in reverse order, with the
-    // most recent actions first.
-
     // The first batch should be the metadata and protocol actions.
     let checkpoint_data = data_iter.next().unwrap()?;
     assert_eq!(checkpoint_data.selection_vector, [true, true]);
@@ -125,11 +168,16 @@ fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
     // contain any true values, as the add action is removed in a following commit.
     assert!(data_iter.next().is_none());
 
-    // Verify the collected metadata
-    // 2 actions (metadata, protocol) + 1 add action + 1 remove action (last action is reconciled)
-    assert_eq!(*writer.total_actions_counter.borrow(), 4);
-    // 1 add action
-    assert_eq!(*writer.total_add_actions_counter.borrow(), 1);
+    // Finalize and verify checkpoint metadata
+    let size_in_bytes = 10;
+    writer.finalize(&engine, &create_checkpoint_metadata_batch(size_in_bytes)?)?;
+    assert_last_checkpoint_contents(
+        &store,
+        2,             // version: latest/last version in the log
+        4,             // size: 1 metadata + 1 protocol + 1 add action + 1 remove action
+        1,             // numOfAddFiles: from the 2nd commit (fake_path_2)
+        size_in_bytes, // sizeInBytes: passed to finalize (10)
+    )?;
 
     Ok(())
 }
@@ -195,11 +243,16 @@ fn test_v1_checkpoint_specific_version() -> DeltaResult<()> {
     // No more data should exist because we only requested version 0
     assert!(data_iter.next().is_none());
 
-    // Verify the collected metadata
-    // 2 actions (metadata and protocol) + 2 add actions
-    assert_eq!(*writer.total_actions_counter.borrow(), 2);
-    // 2 add actions
-    assert_eq!(*writer.total_add_actions_counter.borrow(), 0);
+    // Finalize and verify
+    let size_in_bytes = 10;
+    writer.finalize(&engine, &create_checkpoint_metadata_batch(size_in_bytes)?)?;
+    assert_last_checkpoint_contents(
+        &store,
+        0,             // version: specified version (0)
+        2,             // size: 1 protocol + 1 metadata from version 0
+        0,             // numOfAddFiles: no add files in version 0
+        size_in_bytes, // sizeInBytes: passed to finalize (10)
+    )?;
 
     Ok(())
 }
@@ -272,11 +325,16 @@ fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
     // No more data should exist
     assert!(data_iter.next().is_none());
 
-    // Verify the collected metadata
-    // 3 actions (metadata, protocol, and checkpointMetadata) + 1 add action + 1 remove action
-    assert_eq!(*writer.total_actions_counter.borrow(), 5);
-    // 2 add actions
-    assert_eq!(*writer.total_add_actions_counter.borrow(), 1);
+    // Finalize and verify
+    let size_in_bytes = 10;
+    writer.finalize(&engine, &create_checkpoint_metadata_batch(size_in_bytes)?)?;
+    assert_last_checkpoint_contents(
+        &store,
+        1,             // version: latest version (1) with v2Checkpoint support
+        5,             // size: 1 metadata + 1 protocol + 1 add + 1 remove + 1 checkpointMetadata
+        1,             // numOfAddFiles: 1 add file from version 0
+        size_in_bytes, // sizeInBytes: passed to finalize (10)
+    )?;
 
     Ok(())
 }
@@ -308,7 +366,7 @@ fn test_checkpoint_error_handling_invalid_version() -> DeltaResult<()> {
 
     // Should fail with an appropriate error
     // Returns error: "LogSegment end version 0 not the same as the specified end version 999"
-    // TODO(seb): Update the error message to be tailored to the checkpoint creation
+    // TODO(seb): Returned error should be tailored to checkpoint creation
     assert!(result.is_err());
 
     Ok(())
