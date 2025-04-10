@@ -68,18 +68,13 @@ pub(crate) struct CheckpointLogReplayProcessor {
 impl LogReplayProcessor for CheckpointLogReplayProcessor {
     type Output = FilteredEngineData;
 
-    /// This function is applied to each batch of actions read from the log during
-    /// log replay in reverse chronological order (from most recent to least recent),
-    /// and performs the necessary filtering and deduplication to produce the minimal
-    /// set of actions to be written to the checkpoint file.
+    /// Processes a batch of actions read from the log during reverse chronological replay
+    /// and returns a filtered batch ([`FilteredEngineData`]) to be included in the checkpoint.
     ///
-    /// # Filtering Rules
-    ///
-    /// 1. Only the most recent protocol and metadata actions are included
-    /// 2. For each app ID, only the most recent transaction action is included
-    /// 3. Add and remove actions are deduplicated based on path and unique ID
-    /// 4. Remove tombstones older than `minimum_file_retention_timestamp` are excluded
-    /// 5. Sidecar, commitInfo, and CDC actions are excluded
+    /// This method delegates the filtering logic to the [`CheckpointVisitor`], which implements
+    /// the deduplication rules described in the module documentation. The method tracks
+    /// statistics about processed actions (total count, add actions count) and maintains
+    /// state for cross-batch deduplication.
     fn process_actions_batch(
         &mut self,
         batch: Box<dyn EngineData>,
