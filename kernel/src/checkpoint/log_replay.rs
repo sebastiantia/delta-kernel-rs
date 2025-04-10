@@ -54,7 +54,7 @@ pub(crate) struct CheckpointLogReplayProcessor {
     // Tracks the total number of actions included in the checkpoint file.
     total_actions: Arc<AtomicI64>,
     // Tracks the total number of add actions included in the checkpoint file.
-    total_add_actions: Arc<AtomicI64>,
+    add_actions_count: Arc<AtomicI64>,
     /// Indicates whether a protocol action has been seen in the log.
     seen_protocol: bool,
     /// Indicates whether a metadata action has been seen in the log.
@@ -111,7 +111,7 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
             visitor.file_actions_count + visitor.non_file_actions_count,
             Ordering::Relaxed,
         );
-        self.total_add_actions
+        self.add_actions_count
             .fetch_add(visitor.add_actions_count, Ordering::Relaxed);
 
         // Update protocol and metadata seen flags
@@ -133,13 +133,13 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
 impl CheckpointLogReplayProcessor {
     pub(crate) fn new(
         total_actions: Arc<AtomicI64>,
-        total_add_actions: Arc<AtomicI64>,
+        add_actions_count: Arc<AtomicI64>,
         minimum_file_retention_timestamp: i64,
     ) -> Self {
         Self {
             seen_file_keys: Default::default(),
-            total_actions: total_actions,
-            total_add_actions: total_add_actions,
+            total_actions,
+            add_actions_count,
             seen_protocol: false,
             seen_metadata: false,
             seen_txns: Default::default(),
@@ -160,12 +160,12 @@ impl CheckpointLogReplayProcessor {
 pub(crate) fn checkpoint_actions_iter(
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
     total_actions: Arc<AtomicI64>,
-    total_add_actions: Arc<AtomicI64>,
+    add_actions_count: Arc<AtomicI64>,
     minimum_file_retention_timestamp: i64,
 ) -> impl Iterator<Item = DeltaResult<FilteredEngineData>> {
     CheckpointLogReplayProcessor::new(
         total_actions,
-        total_add_actions,
+        add_actions_count,
         minimum_file_retention_timestamp,
     )
     .process_actions_iter(action_iter)
@@ -495,6 +495,33 @@ mod tests {
     use itertools::Itertools;
     use std::collections::HashSet;
 
+    /// Helper function to create test batches from JSON strings
+    fn create_batch(json_strings: Vec<&str>) -> DeltaResult<(Box<dyn EngineData>, bool)> {
+        Ok((parse_json_batch(StringArray::from(json_strings)), true))
+    }
+
+    /// Helper function which applies the `checkpoint_actions_iter` function to a set of
+    /// input batches and returns the results.
+    fn run_checkpoint_test(
+        input_batches: Vec<(Box<dyn EngineData>, bool)>,
+    ) -> DeltaResult<(Vec<FilteredEngineData>, i64, i64)> {
+        let total_actions = Arc::new(AtomicI64::new(0));
+        let add_actions_count = Arc::new(AtomicI64::new(0));
+        let results: Vec<_> = checkpoint_actions_iter(
+            input_batches.into_iter().map(Ok),
+            total_actions.clone(),
+            add_actions_count.clone(),
+            0,
+        )
+        .try_collect()?;
+
+        Ok((
+            results,
+            total_actions.load(Ordering::Relaxed),
+            add_actions_count.load(Ordering::Relaxed),
+        ))
+    }
+
     #[test]
     fn test_checkpoint_visitor() -> DeltaResult<()> {
         let data = action_batch();
@@ -610,14 +637,14 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_visitor_conflicts_with_deletion_vectors() -> DeltaResult<()> {
+    fn test_checkpoint_visitor_file_actions_with_deletion_vectors() -> DeltaResult<()> {
         let json_strings: StringArray = vec![
             // Add action for file1 with deletion vector
-            r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"two","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#, 
-             // Remove action for file1 with a different deletion vector
-             r#"{"remove":{"path":"file1","deletionTimestamp":100,"dataChange":true,"deletionVector":{"storageType":"one","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
-             // Add action for file1 with the same deletion vector as the remove action above (excluded)
-             r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"one","pathOrInlineDv":"vBn[lx{q8@P<9BNH/isA","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
+            r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"ONE","pathOrInlineDv":"dv1","offset":1,"sizeInBytes":36,"cardinality":2}}}"#, 
+            // Remove action for file1 with a different deletion vector
+            r#"{"remove":{"path":"file1","deletionTimestamp":100,"dataChange":true,"deletionVector":{"storageType":"TWO","pathOrInlineDv":"dv2","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
+            // Remove action for file1 with another different deletion vector
+            r#"{"remove":{"path":"file1","deletionTimestamp":100,"dataChange":true,"deletionVector":{"storageType":"THREE","pathOrInlineDv":"dv3","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
          ]
         .into();
         let batch = parse_json_batch(json_strings);
@@ -636,9 +663,9 @@ mod tests {
 
         visitor.visit_rows_of(batch.as_ref())?;
 
-        let expected = vec![true, true, false];
+        let expected = vec![true, true, true];
         assert_eq!(visitor.selection_vector, expected);
-        assert_eq!(visitor.file_actions_count, 2);
+        assert_eq!(visitor.file_actions_count, 3);
         assert_eq!(visitor.add_actions_count, 1);
         assert_eq!(visitor.non_file_actions_count, 0);
 
@@ -719,76 +746,117 @@ mod tests {
         Ok(())
     }
 
-    /// Tests the [`CheckpointLogReplayProcessor`] by applying the processor across
-    /// multiple batches of actions. This test ensures that the processor correctly saves state
-    /// in order to deduplicate actions across batches. More granular tests for the
-    /// [`CheckpointVisitor`] are in the above `test_checkpoint_visitor` tests.
+    /// This test ensures that the processor correctly deduplicates and filters
+    /// non-file actions (metadata, protocol, txn) across multiple batches.
     #[test]
-    fn test_checkpoint_actions_iter_multi_batch_test() -> DeltaResult<()> {
-        // Setup counters
-        let total_actions = Arc::new(AtomicI64::new(0));
-        let total_add_actions = Arc::new(AtomicI64::new(0));
-
-        // Create first batch with protocol, metadata, and some files
-        let json_strings1: StringArray = vec![
-                r#"{"protocol":{"minReaderVersion":1,"minWriterVersion":2}}"#,
-                r#"{"metaData":{"id":"test2","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"c1\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c2\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c3\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":["c1","c2"],"configuration":{},"createdTime":1670892997849}}"#,
-                r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
-                r#"{"add":{"path":"file1","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,
-                r#"{"add":{"path":"file2","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,
-            ].into();
-        // Create second batch with some duplicates and new files
-        let json_strings2: StringArray = vec![
-                // Protocol, metadata, txn should be skipped as duplicates
-                r#"{"protocol":{"minReaderVersion":1,"minWriterVersion":2}}"#,
-                r#"{"metaData":{"id":"test1","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"c1\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c2\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c3\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":["c1","c2"],"configuration":{},"createdTime":1670892997849}}"#,
-                r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
-                // New file
-                r#"{"add":{"path":"file3","partitionValues":{},"size":800,"modificationTime":102,"dataChange":true}}"#,
-                // Duplicate file should be skipped
-                r#"{"add":{"path":"file1","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,            // Transaction
-                // Unique transaction (appId) should be included
-                r#"{"txn":{"appId":"app2","version":1,"lastUpdated":123456789}}"#
-            ].into();
-        // Create third batch with all duplicate actions.
-        // The *entire* batch should be skippped as there are no selected actions to write from this batch.
-        let json_strings3: StringArray = vec![
-                r#"{"add":{"path":"file1","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,
-                r#"{"add":{"path":"file2","partitionValues":{"c1":"4","c2":"c"},"size":452,"modificationTime":1670892998135,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"c3\":5},\"maxValues\":{\"c3\":5},\"nullCount\":{\"c3\":0}}"}}"#,
-            ].into();
-        let input_batches = vec![
-            Ok((parse_json_batch(json_strings1), true)), // true = commit batch
-            Ok((parse_json_batch(json_strings2), true)),
-            Ok((parse_json_batch(json_strings3), true)),
+    fn test_checkpoint_actions_iter_non_file_actions() -> DeltaResult<()> {
+        // Batch 1: protocol, metadata, and txn actions
+        let batch1 = vec![
+            r#"{"protocol":{"minReaderVersion":1,"minWriterVersion":2}}"#,
+            r#"{"metaData":{"id":"test1","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"c1\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c2\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c3\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":["c1","c2"],"configuration":{},"createdTime":1670892997849}}"#,
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
         ];
 
-        let results: Vec<_> = checkpoint_actions_iter(
-            input_batches.into_iter(),
-            total_actions.clone(),
-            total_add_actions.clone(),
-            0,
-        )
-        .try_collect()?;
+        // Batch 2: duplicate actions, and a new txn action
+        let batch2 = vec![
+            // Duplicates that should be skipped
+            r#"{"protocol":{"minReaderVersion":2,"minWriterVersion":3}}"#,
+            r#"{"metaData":{"id":"test2","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"c1\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c2\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c3\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":["c1","c2"],"configuration":{},"createdTime":1670892997849}}"#,
+            r#"{"txn":{"appId":"app1","version":1,"lastUpdated":123456789}}"#,
+            // Unique transaction (appId) should be included
+            r#"{"txn":{"appId":"app2","version":1,"lastUpdated":123456789}}"#,
+        ];
 
-        // Expect two batches in results (third batch should be filtered out)
+        // Batch 3: a duplicate action (entire batch should be skipped)
+        let batch3 = vec![r#"{"protocol":{"minReaderVersion":2,"minWriterVersion":3}}"#];
+
+        let input_batches = vec![
+            create_batch(batch1)?,
+            create_batch(batch2)?,
+            create_batch(batch3)?,
+        ];
+        let (results, total_actions, add_actions) = run_checkpoint_test(input_batches)?;
+
+        // Verify results
+        assert_eq!(results.len(), 2, "Expected two batches in results");
+        assert_eq!(results[0].selection_vector, vec![true, true, true],);
+        assert_eq!(results[1].selection_vector, vec![false, false, false, true],);
+        assert_eq!(total_actions, 4);
+        assert_eq!(add_actions, 0);
+
+        Ok(())
+    }
+
+    /// This test ensures that the processor correctly deduplicates and filters
+    /// file actions (add, remove) across multiple batches.
+    #[test]
+    fn test_checkpoint_actions_iter_file_actions() -> DeltaResult<()> {
+        // Batch 1: add action (file1) - new, should be included
+        let batch1 = vec![
+            r#"{"add":{"path":"file1","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#,
+        ];
+
+        // Batch 2: remove actions - mixed inclusion
+        let batch2 = vec![
+            // Already seen file, should be excluded
+            r#"{"remove":{"path":"file1","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#,
+            // New file, should be included
+            r#"{"remove":{"path":"file2","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#,
+        ];
+
+        // Batch 3: add action (file2) - already seen, should be excluded
+        let batch3 = vec![
+            r#"{"add":{"path":"file2","partitionValues":{"c1":"6","c2":"a"},"size":452,"modificationTime":1670892998137,"dataChange":true}}"#,
+        ];
+
+        let input_batches = vec![
+            create_batch(batch1)?,
+            create_batch(batch2)?,
+            create_batch(batch3)?,
+        ];
+        let (results, total_actions, add_actions) = run_checkpoint_test(input_batches)?;
+
+        // Verify results
+        assert_eq!(results.len(), 2); // The third batch should be filtered out since there are no selected actions
+        assert_eq!(results[0].selection_vector, vec![true]);
+        assert_eq!(results[1].selection_vector, vec![false, true]);
+        assert_eq!(total_actions, 2);
+        assert_eq!(add_actions, 1);
+
+        Ok(())
+    }
+
+    /// This test ensures that the processor correctly deduplicates and filters
+    /// file actions (add, remove) with deletion vectors across multiple batches.
+    #[test]
+    fn test_checkpoint_actions_iter_file_actions_with_deletion_vectors() -> DeltaResult<()> {
+        // Batch 1: add actions with deletion vectors
+        let batch1 = vec![
+            // (file1, DV_ONE) New, should be included
+            r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"ONE","pathOrInlineDv":"dv1","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
+            // (file1, DV_TWO) New, should be included
+            r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"TWO","pathOrInlineDv":"dv2","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
+        ];
+
+        // Batch 2: mixed actions with duplicate and new entries
+        let batch2 = vec![
+            // (file1, DV_ONE): Already seen, should be excluded
+            r#"{"remove":{"path":"file1","deletionTimestamp":100,"dataChange":true,"deletionVector":{"storageType":"ONE","pathOrInlineDv":"dv1","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
+            // (file1, DV_TWO): Already seen, should be excluded
+            r#"{"add":{"path":"file1","partitionValues":{},"size":635,"modificationTime":100,"dataChange":true,"deletionVector":{"storageType":"TWO","pathOrInlineDv":"dv2","offset":1,"sizeInBytes":36,"cardinality":2}}}"#,
+            // New file, should be included
+            r#"{"remove":{"path":"file2","deletionTimestamp":100,"dataChange":true,"partitionValues":{}}}"#,
+        ];
+
+        let input_batches = vec![create_batch(batch1)?, create_batch(batch2)?];
+        let (results, total_actions, add_actions) = run_checkpoint_test(input_batches)?;
+
+        // Verify results
         assert_eq!(results.len(), 2);
-
-        // First batch should have all rows selected
-        let checkpoint_data = &results[0];
-        assert_eq!(
-            checkpoint_data.selection_vector,
-            vec![true, true, true, true, true]
-        );
-        // Second batch should have only new file and unique transaction selected
-        let checkpoint_data = &results[1];
-        assert_eq!(
-            checkpoint_data.selection_vector,
-            vec![false, false, false, true, false, true]
-        );
-        // 6 total actions (5 from batch1 + 2 from batch2 + 0 from batch3)
-        assert_eq!(total_actions.load(Ordering::Relaxed), 7);
-        // 3 add actions (2 from batch1 + 1 from batch2)
-        assert_eq!(total_add_actions.load(Ordering::Relaxed), 3);
+        assert_eq!(results[0].selection_vector, vec![true, true]);
+        assert_eq!(results[1].selection_vector, vec![false, false, true]);
+        assert_eq!(total_actions, 3);
+        assert_eq!(add_actions, 2);
 
         Ok(())
     }
