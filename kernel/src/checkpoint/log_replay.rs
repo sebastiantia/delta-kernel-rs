@@ -42,8 +42,8 @@ use std::sync::{Arc, LazyLock};
 
 /// The [`CheckpointLogReplayProcessor`] is an implementation of the [`LogReplayProcessor`]
 /// trait that filters log segment actions for inclusion in a V1 spec checkpoint file. This
-/// processor is also leveraged when creating a single-file V2 checkpoint as the V2 spec
-/// is a superset of the V1 spec, with the addition of a [`CheckpointMetadata`] action.
+/// processor is leveraged when creating a single-file V2 checkpoint as the V2 spec schema is
+/// a superset of the V1 spec schema, with the addition of a [`CheckpointMetadata`] action.
 ///
 /// It processes each action batch via the `process_actions_batch` method, using the
 /// [`CheckpointVisitor`] to build an accompanying selection vector indicating which actions
