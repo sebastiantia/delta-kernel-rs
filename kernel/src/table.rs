@@ -113,7 +113,9 @@ impl Table {
         engine: &dyn Engine,
         version: Option<Version>,
     ) -> DeltaResult<CheckpointWriter> {
-        Ok(CheckpointWriter::new(Arc::new(self.snapshot(engine, version)?)))
+        Ok(CheckpointWriter::new(Arc::new(
+            self.snapshot(engine, version)?,
+        )))
     }
 
     /// Create a new write transaction for this table.
