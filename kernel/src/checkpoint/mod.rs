@@ -18,7 +18,7 @@
 //! Handles the actual checkpoint data generation and writing process. It is created via the
 //! [`Table::checkpoint()`] method and provides the following APIs:
 //! - `new(snapshot: Snapshot) -> Self` - Creates a new writer for the given table snapshot
-//! - `checkpoint_data(engine: &dyn Engine) -> DeltaResult<SingleFileCheckpointData>` -
+//! - `checkpoint_data(engine: &dyn Engine) -> DeltaResult<CheckpointData>` -
 //!   Returns the checkpoint data and path information
 //! - `finalize(engine: &dyn Engine, metadata: &dyn EngineData) -> DeltaResult<()>` -
 //!   Writes the _last_checkpoint file after the checkpoint data has been written
@@ -73,6 +73,7 @@ use crate::actions::{
     schemas::GetStructField, Add, Metadata, Protocol, Remove, SetTransaction, Sidecar, ADD_NAME,
     METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME, SIDECAR_NAME,
 };
+use crate::engine_data::FilteredEngineData;
 use crate::expressions::{column_expr, Scalar};
 use crate::path::ParsedLogPath;
 use crate::schema::{DataType, SchemaRef, StructField, StructType};
@@ -80,7 +81,7 @@ use crate::snapshot::Snapshot;
 #[cfg(doc)]
 use crate::{actions::CheckpointMetadata, table::Table};
 use crate::{DeltaResult, Engine, EngineData, Error, EvaluationHandlerExtension, Expression};
-use log_replay::{checkpoint_actions_iter, CheckpointData};
+use log_replay::checkpoint_actions_iter;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::{
     sync::{Arc, LazyLock},
@@ -113,14 +114,12 @@ fn get_checkpoint_actions_schema() -> &'static SchemaRef {
 }
 
 /// Represents a single-file checkpoint, including the data to write and the target path.
-///
-/// TODO(seb): Rename to `CheckpointData` once `FilteredEngineData` is introduced.
-pub struct SingleFileCheckpointData {
+pub struct CheckpointData {
     /// The URL where the checkpoint file should be written.
     pub path: Url,
 
     /// An iterator over the checkpoint data to be written to the file.
-    pub data: Box<dyn Iterator<Item = DeltaResult<CheckpointData>>>,
+    pub data: Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>>>,
 }
 
 /// Manages the checkpoint writing process for Delta tables
@@ -131,7 +130,7 @@ pub struct SingleFileCheckpointData {
 ///
 /// # Usage
 /// 1. Create via [`Table::checkpoint()`]
-/// 2. Call [`CheckpointWriter::checkpoint_data()`] to obtain [`SingleFileCheckpointData`],
+/// 2. Call [`CheckpointWriter::checkpoint_data()`] to obtain [`CheckpointData`],
 ///    containing the checkpoint path and data iterator
 /// 3. Write the checkpoint data to storage (implementation-specific)
 /// 4. Call [`CheckpointWriter::finalize()`] to create the _last_checkpoint file
@@ -181,11 +180,8 @@ impl CheckpointWriter {
     /// before calling `finalize()` otherwise data loss may occur.
     ///
     /// # Returns
-    /// A [`SingleFileCheckpointData`] containing the checkpoint path and action iterator
-    pub fn checkpoint_data(
-        &mut self,
-        engine: &dyn Engine,
-    ) -> DeltaResult<SingleFileCheckpointData> {
+    /// A [`CheckpointData`] containing the checkpoint path and action iterator
+    pub fn checkpoint_data(&mut self, engine: &dyn Engine) -> DeltaResult<CheckpointData> {
         if self.data_consumed {
             return Err(Error::generic("Checkpoint data has already been consumed"));
         }
@@ -225,7 +221,7 @@ impl CheckpointWriter {
 
         self.data_consumed = true;
 
-        Ok(SingleFileCheckpointData {
+        Ok(CheckpointData {
             path: checkpoint_path.location,
             data: Box::new(chained),
         })
@@ -302,14 +298,14 @@ impl CheckpointWriter {
     /// version field of the [`CheckpointMetadata`] action. Future implementations will
     /// include the additional metadata field `tags` when map support is added.
     ///
-    /// The resulting [`CheckpointData`] includes a selection vector with a single `true`
+    /// The resulting [`FilteredEngineData`] includes a selection vector with a single `true`
     /// value, indicating this action should always be included in the checkpoint.
     fn create_checkpoint_metadata_batch(
         &self,
         version: i64,
         engine: &dyn Engine,
         is_v2_checkpoint: bool,
-    ) -> DeltaResult<Option<DeltaResult<CheckpointData>>> {
+    ) -> DeltaResult<Option<DeltaResult<FilteredEngineData>>> {
         if !is_v2_checkpoint {
             return Ok(None);
         }
@@ -324,7 +320,7 @@ impl CheckpointWriter {
 
         let checkpoint_metadata_batch = engine.evaluation_handler().create_one(schema, values)?;
 
-        let result = CheckpointData {
+        let result = FilteredEngineData {
             data: checkpoint_metadata_batch,
             selection_vector: vec![true], // Always include this action
         };
