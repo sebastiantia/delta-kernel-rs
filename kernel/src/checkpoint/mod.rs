@@ -31,7 +31,6 @@
 //! ## [`CheckpointWriter`]
 //! Handles the actual checkpoint data generation and writing process. It is created via the
 //! [`crate::table::Table::checkpoint`] method and provides the following APIs:
-//! - [`CheckpointWriter::new`] - Creates a new writer for the given table snapshot
 //! - [`CheckpointWriter::checkpoint_data`] - Returns the checkpoint data and path information
 //! - [`CheckpointWriter::finalize`] - Writes the `_last_checkpoint` file
 //!
@@ -132,7 +131,7 @@ pub struct CheckpointData {
 pub struct CheckpointWriter {
     /// Reference to the snapshot of the table being checkpointed
     pub(crate) snapshot: Arc<Snapshot>,
-    /// Note: Arc<AtomicI64> provides shared mutability for our counters, allowing the
+    /// Note: `Arc<AtomicI64>` provides shared mutability for our counters, allowing the
     /// returned actions iterator from `.checkpoint_data()` to update the counters,
     /// and the [`CheckpointWriter`] to read them during `.finalize()`
     /// Counter for total actions included in the checkpoint
@@ -222,7 +221,7 @@ impl CheckpointWriter {
     /// - `metadata`: A single-row, single-column [`EngineData`] batch containing:
     ///   - `sizeInBytes` (i64): The size of the written checkpoint file
     ///
-    /// # Returns: [`Ok()`] if the `_last_checkpoint` file was written successfully
+    /// # Returns: [`variant@Ok`] if the `_last_checkpoint` file was written successfully
     pub fn finalize(self, engine: &dyn Engine, metadata: &dyn EngineData) -> DeltaResult<()> {
         let version = self.snapshot.version().try_into().map_err(|e| {
             Error::generic(format!(
@@ -429,7 +428,7 @@ fn create_last_checkpoint_data(
     )]));
 
     let last_checkpoint_metadata_evaluator = engine.evaluation_handler().new_expression_evaluator(
-        engine_metadata_schema.into(),
+        engine_metadata_schema,
         last_checkpoint_expr,
         last_checkpoint_schema.into(),
     );
