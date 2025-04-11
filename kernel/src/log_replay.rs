@@ -16,7 +16,7 @@
 
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
 #[cfg(doc)]
-use crate::checkpoint::CheckpointLogReplayProcessor;
+use crate::checkpoint::log_replay::CheckpointLogReplayProcessor;
 use crate::engine_data::{GetData, TypedGetData};
 use crate::scan::data_skipping::DataSkippingFilter;
 #[cfg(doc)]
