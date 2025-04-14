@@ -306,7 +306,7 @@ impl Snapshot {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-struct LastCheckpointHint {
+pub(crate) struct LastCheckpointHint {
     /// The version of the table when the last checkpoint was made.
     #[allow(unreachable_pub)] // used by acceptance tests (TODO make an fn accessor?)
     pub version: Version,
