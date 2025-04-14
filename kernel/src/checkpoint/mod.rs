@@ -60,12 +60,15 @@
 //! writer.finalize(&engine, &metadata)?;
 //! ```
 //! ## Future extensions
-//! - Single-file UUID-named V2 checkpoints (using `n.checkpoint.u.{json/parquet}` naming) are to be
+//! - TODO(#836): Single-file UUID-named V2 checkpoints (using `n.checkpoint.u.{json/parquet}` naming) are to be
 //!   implemented in the future. The current implementation only supports classic-named V2 checkpoints.
-//! - Multi-file V2 checkpoints are not supported yet. The API is designed to be extensible for future
+//! - TODO(#837): Multi-file V2 checkpoints are not supported yet. The API is designed to be extensible for future
 //!   multi-file support, but the current implementation only supports single-file checkpoints.
 //!
 //! Note: Multi-file V1 checkpoints are DEPRECATED and UNSAFE.
+//!
+//! [`CheckpointMetadata`]: crate::actions::CheckpointMetadata
+//! [`LastCheckpointHint`]: crate::snapshot::LastCheckpointHint
 use crate::actions::CHECKPOINT_METADATA_NAME;
 use crate::actions::{
     schemas::GetStructField, Add, Metadata, Protocol, Remove, SetTransaction, Sidecar, ADD_NAME,
@@ -73,15 +76,12 @@ use crate::actions::{
 };
 use crate::engine_data::FilteredEngineData;
 use crate::expressions::{column_expr, Scalar};
+use crate::log_replay::LogReplayProcessor;
 use crate::path::ParsedLogPath;
 use crate::schema::{DataType, SchemaRef, StructField, StructType};
-#[cfg(doc)]
-use crate::snapshot::LastCheckpointHint;
 use crate::snapshot::Snapshot;
-#[cfg(doc)]
-use crate::{actions::CheckpointMetadata, table::Table};
 use crate::{DeltaResult, Engine, EngineData, Error, EvaluationHandlerExtension, Expression};
-use log_replay::checkpoint_actions_iter;
+use log_replay::CheckpointLogReplayProcessor;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::{
     sync::{Arc, LazyLock},
@@ -92,10 +92,28 @@ mod log_replay;
 #[cfg(test)]
 mod tests;
 
-/// Name of the _last_checkpoint file that provides metadata about the last checkpoint
+/// Name of the `_last_checkpoint`` file that provides metadata about the last checkpoint
 /// created for the table. This file is used as a hint for the engine to quickly locate
 /// the last checkpoint and avoid full log replay when reading the table.
 static LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint.json";
+
+/// Schema of the `_last_checkpoint` file
+/// We cannot use `LastCheckpointInfo::to_schema()` as it would include the 'checkpoint_schema'
+/// field, which is only known at runtime.
+static LAST_CHECKPOINT_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
+    StructType::new([
+        StructField::not_null("version", DataType::LONG),
+        StructField::not_null("size", DataType::LONG),
+        StructField::nullable("parts", DataType::LONG),
+        StructField::nullable("sizeInBytes", DataType::LONG),
+        StructField::nullable("numOfAddFiles", DataType::LONG),
+    ])
+    .into()
+});
+
+/// Schema of metadata passed to the [`CheckpointWriter::finalize()`] method by the engine
+static ENGINE_CHECKPOINT_METADATA_SCHEMA: LazyLock<SchemaRef> =
+    LazyLock::new(|| StructType::new([StructField::not_null("version", DataType::LONG)]).into());
 
 /// Schema for extracting relevant actions from log files for checkpoint creation
 static CHECKPOINT_ACTIONS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
@@ -110,9 +128,35 @@ static CHECKPOINT_ACTIONS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     .into()
 });
 
+// Schema of the [`CheckpointMetadata`] action that is included in V2 checkpoints
+// We cannot use `CheckpointMetadata::to_schema()` as it would include the 'tags' field which
+// we're not supporting yet due to the lack of map support.
+static CHECKPOINT_METADATA_ACTION_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
+    StructType::new([StructField::not_null(
+        CHECKPOINT_METADATA_NAME,
+        DataType::struct_type([StructField::not_null("version", DataType::LONG)]),
+    )])
+    .into()
+});
+
+/// Returns the schema for writing the `_last_checkpoint` file
+fn get_last_checkpoint_schema() -> &'static SchemaRef {
+    &LAST_CHECKPOINT_SCHEMA
+}
+
 /// Returns the schema for reading Delta log actions for checkpoint creation
 fn get_checkpoint_actions_schema() -> &'static SchemaRef {
     &CHECKPOINT_ACTIONS_SCHEMA
+}
+
+/// Returns the schema of the metadata passed to the [`CheckpointWriter::finalize()`] method by the engine
+fn get_engine_checkpoint_metadata_schema() -> &'static SchemaRef {
+    &ENGINE_CHECKPOINT_METADATA_SCHEMA
+}
+
+/// Returns the schema of the [`CheckpointMetadata`] action that is included in V2 checkpoints
+fn get_checkpoint_metadata_action_schema() -> &'static SchemaRef {
+    &CHECKPOINT_METADATA_ACTION_SCHEMA
 }
 
 /// Represents a single-file checkpoint, including the data to write and the target path.
@@ -177,19 +221,27 @@ impl CheckpointWriter {
             read_schema.clone(),
             read_schema.clone(),
             None,
-        );
+        )?;
 
         // Create iterator over actions for checkpoint data
-        let checkpoint_data = checkpoint_actions_iter(
-            actions?,
+        let checkpoint_data = CheckpointLogReplayProcessor::new(
             self.total_actions_counter.clone(),
             self.add_actions_counter.clone(),
             self.deleted_file_retention_timestamp()?,
-        );
+        )
+        .process_actions_iter(actions);
+
+        let version = self.snapshot.version().try_into().map_err(|e| {
+            Error::generic(format!(
+                "Failed to convert checkpoint version from u64 {} to i64: {}",
+                self.snapshot.version(),
+                e
+            ))
+        })?;
 
         // Chain the checkpoint metadata action if using V2 checkpoints
         let chained = checkpoint_data.chain(self.create_checkpoint_metadata_batch(
-            self.snapshot.version() as i64,
+            version,
             engine,
             is_v2_checkpoints_supported,
         )?);
@@ -235,8 +287,8 @@ impl CheckpointWriter {
             engine,
             metadata,
             version,
-            self.total_actions_counter.load(Ordering::Relaxed),
-            self.add_actions_counter.load(Ordering::Relaxed),
+            self.total_actions_counter.load(Ordering::SeqCst),
+            self.add_actions_counter.load(Ordering::SeqCst),
         )?;
 
         let last_checkpoint_path = self
@@ -282,25 +334,19 @@ impl CheckpointWriter {
         }
         let values: &[Scalar] = &[version.into()];
 
-        // Note: We cannot use `CheckpointMetadata::to_schema()` as it would include
-        // the 'tags' field which we're not supporting yet due to the lack of map support.
-        // Schema of the checkpoint metadata action
-        let schema = Arc::new(StructType::new([StructField::not_null(
-            CHECKPOINT_METADATA_NAME,
-            DataType::struct_type([StructField::not_null("version", DataType::LONG)]),
-        )]));
-
-        let checkpoint_metadata_batch = engine.evaluation_handler().create_one(schema, values)?;
+        let checkpoint_metadata_batch = engine
+            .evaluation_handler()
+            .create_one(get_checkpoint_metadata_action_schema().clone(), values)?;
 
         let result = FilteredEngineData {
             data: checkpoint_metadata_batch,
-            selection_vector: vec![true], // Always include this action
+            selection_vector: vec![true], // Include the action in the checkpoint
         };
 
         // Ordering does not matter as there are no other threads modifying this counter
         // at this time (since we have not yet returned the iterator which performs the action counting)
         self.total_actions_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         Ok(Some(Ok(result)))
     }
@@ -380,8 +426,8 @@ fn deleted_file_retention_timestamp_with_time(
 /// - `sizeInBytes` (i64, optional): Size of checkpoint file in bytes
 /// - `numOfAddFiles` (i64, optional): Number of Add actions
 ///
-/// Note: The fields `checkpointSchema` and `checksum` are not yet included in this
-/// implementation. They are marked as TODOs for future development.
+/// TODO(#838) Add `checksum` field to the `_last_checkpoint` file
+/// TODO(#839) Add `checkpoint_schema` field to the `_last_checkpoint` file
 fn create_last_checkpoint_data(
     engine: &dyn Engine,
     metadata: &dyn EngineData,
@@ -397,40 +443,21 @@ fn create_last_checkpoint_data(
         )));
     }
 
-    // The current checkpoint API only supports single-file checkpoints.
-    let parts: i64 = 1; // Coerce the type to `i64`` to match the expected schema.
     let last_checkpoint_exprs = [
         Expression::literal(version),
         Expression::literal(total_actions_counter),
-        Expression::literal(parts),
+        Expression::literal(1i64), // Single-file checkpoint
         column_expr!("sizeInBytes"),
         Expression::literal(add_actions_counter),
-        // TODO(seb): Write the `checkpoint_schema` field
-        // TODO(seb): Write the `checksum` field
+        // TODO(#838): Include the checksum here
+        // TODO(#839): Include the schema here
     ];
     let last_checkpoint_expr = Expression::struct_from(last_checkpoint_exprs);
 
-    // Note: We cannot use `LastCheckpointInfo::to_schema()` as it would include
-    // the 'checkpoint_schema' field, which is only known at runtime.
-    // Schema of the `_last_checkpoint` file
-    let last_checkpoint_schema = Arc::new(StructType::new([
-        StructField::not_null("version", DataType::LONG),
-        StructField::not_null("size", DataType::LONG),
-        StructField::nullable("parts", DataType::LONG),
-        StructField::nullable("sizeInBytes", DataType::LONG),
-        StructField::nullable("numOfAddFiles", DataType::LONG),
-    ]));
-
-    // The schema of the metadata passed to `.finalize()` should be a single-row, single-column batch
-    let engine_metadata_schema = Arc::new(StructType::new([StructField::not_null(
-        "version",
-        DataType::LONG,
-    )]));
-
     let last_checkpoint_metadata_evaluator = engine.evaluation_handler().new_expression_evaluator(
-        engine_metadata_schema,
+        get_engine_checkpoint_metadata_schema().clone(),
         last_checkpoint_expr,
-        last_checkpoint_schema.into(),
+        get_last_checkpoint_schema().clone().into(),
     );
 
     last_checkpoint_metadata_evaluator.evaluate(metadata)
@@ -520,7 +547,7 @@ mod unit_tests {
         .unwrap();
 
         assert_eq!(*record_batch, expected);
-        assert_eq!(writer.total_actions_counter.load(Ordering::Relaxed), 1);
+        assert_eq!(writer.total_actions_counter.load(Ordering::SeqCst), 1);
 
         Ok(())
     }
@@ -536,7 +563,7 @@ mod unit_tests {
 
         // No checkpoint metadata action should be created for V1 checkpoints
         assert!(result.is_none());
-        assert_eq!(writer.total_actions_counter.load(Ordering::Relaxed), 0);
+        assert_eq!(writer.total_actions_counter.load(Ordering::SeqCst), 0);
 
         Ok(())
     }

@@ -28,22 +28,28 @@
 //!   3. Updates counters and state for cross-batch deduplication
 //!   4. Produces a [`FilteredEngineData`] result which includes a selection vector indicating which
 //!      actions should be included in the checkpoint file
+//!
+//! [`CheckpointMetadata`]: crate::actions::CheckpointMetadata
 use crate::engine_data::{FilteredEngineData, GetData, RowVisitor, TypedGetData as _};
 use crate::log_replay::{FileActionDeduplicator, FileActionKey, LogReplayProcessor};
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::schema::{column_name, ColumnName, ColumnNamesAndTypes, DataType};
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error};
+
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock};
 
 /// The [`CheckpointLogReplayProcessor`] is an implementation of the [`LogReplayProcessor`]
-/// trait that filters log segment actions for inclusion in a V1 spec checkpoint file.
+/// trait that filters log segment actions for inclusion in a V1 spec checkpoint file. This
+/// processor is leveraged when creating a single-file V2 checkpoint as the V2 spec schema is
+/// a superset of the V1 spec schema, with the addition of a [`CheckpointMetadata`] action.
 ///
 /// It processes each action batch via the `process_actions_batch` method, using the
 /// [`CheckpointVisitor`] to build an accompanying selection vector indicating which actions
 /// should be included in the checkpoint.
+#[allow(unused)] // TODO(seb): Remove once checkpoint api is implemented
 pub(crate) struct CheckpointLogReplayProcessor {
     /// Tracks file actions that have been seen during log replay to avoid duplicates.
     /// Contains (data file path, dv_unique_id) pairs as `FileActionKey` instances.
@@ -52,7 +58,7 @@ pub(crate) struct CheckpointLogReplayProcessor {
     // iterator to update the values during processing and the caller to observe the final
     // counts afterward. The counters are i64 to match the `_last_checkpoint` file schema.
     // Tracks the total number of actions included in the checkpoint file.
-    total_actions: Arc<AtomicI64>,
+    actions_count: Arc<AtomicI64>,
     // Tracks the total number of add actions included in the checkpoint file.
     add_actions_count: Arc<AtomicI64>,
     /// Indicates whether a protocol action has been seen in the log.
@@ -81,11 +87,6 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
         is_log_batch: bool,
     ) -> DeltaResult<Self::Output> {
         let selection_vector = vec![true; batch.len()];
-        assert_eq!(
-            selection_vector.len(),
-            batch.len(),
-            "Initial selection vector length does not match actions length"
-        );
 
         // Create the checkpoint visitor to process actions and update selection vector
         let mut visitor = CheckpointVisitor::new(
@@ -99,15 +100,12 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
         );
         visitor.visit_rows_of(batch.as_ref())?;
 
-        // Update the total actions and add actions counters. Relaxed ordering is sufficient
-        // here as we only care about the total count when writing the _last_checkpoint file.
-        // (the ordering is not important for correctness)
-        self.total_actions.fetch_add(
+        self.actions_count.fetch_add(
             visitor.file_actions_count + visitor.non_file_actions_count,
-            Ordering::Relaxed,
+            Ordering::SeqCst,
         );
         self.add_actions_count
-            .fetch_add(visitor.add_actions_count, Ordering::Relaxed);
+            .fetch_add(visitor.add_actions_count, Ordering::SeqCst);
 
         // Update protocol and metadata seen flags
         self.seen_protocol = visitor.seen_protocol;
@@ -119,21 +117,22 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
         })
     }
 
-    /// Data skipping is not applicable for checkpoint log replay.
+    /// We never do data skipping for checkpoint log replay (entire table state is always reproduced)
     fn data_skipping_filter(&self) -> Option<&DataSkippingFilter> {
         None
     }
 }
 
 impl CheckpointLogReplayProcessor {
+    #[allow(unused)] // TODO(seb): Remove once checkpoint api is implemented
     pub(crate) fn new(
-        total_actions: Arc<AtomicI64>,
+        actions_count: Arc<AtomicI64>,
         add_actions_count: Arc<AtomicI64>,
         minimum_file_retention_timestamp: i64,
     ) -> Self {
         Self {
             seen_file_keys: Default::default(),
-            total_actions,
+            actions_count,
             add_actions_count,
             seen_protocol: false,
             seen_metadata: false,
@@ -141,29 +140,6 @@ impl CheckpointLogReplayProcessor {
             minimum_file_retention_timestamp,
         }
     }
-}
-
-/// Given an iterator of (engine_data, bool) tuples, returns an iterator of
-/// `(engine_data, selection_vec)`. Each row that is selected in the returned `engine_data` _must_
-/// be written to the V1 checkpoint file in order to capture the table version's complete state.
-/// Non-selected rows _must_ be ignored. The boolean flag tied to each actions batch indicates
-/// whether the batch is a commit batch (true) or a checkpoint batch (false).
-///
-/// Note: The 'action_iter' parameter is an iterator of (engine_data, bool) tuples that _must_ be
-/// sorted by the order of the actions in the log from most recent to least recent.
-#[allow(unused)] // TODO: Remove once API is implemented
-pub(crate) fn checkpoint_actions_iter(
-    action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
-    total_actions: Arc<AtomicI64>,
-    add_actions_count: Arc<AtomicI64>,
-    minimum_file_retention_timestamp: i64,
-) -> impl Iterator<Item = DeltaResult<FilteredEngineData>> {
-    CheckpointLogReplayProcessor::new(
-        total_actions,
-        add_actions_count,
-        minimum_file_retention_timestamp,
-    )
-    .process_actions_iter(action_iter)
 }
 
 /// A visitor that filters actions for inclusion in a V1 spec checkpoint file.
@@ -487,7 +463,6 @@ mod tests {
     use super::*;
     use crate::arrow::array::StringArray;
     use crate::utils::test_utils::{action_batch, parse_json_batch};
-    use itertools::Itertools;
     use std::collections::HashSet;
 
     /// Helper function to create test batches from JSON strings
@@ -495,24 +470,24 @@ mod tests {
         Ok((parse_json_batch(StringArray::from(json_strings)), true))
     }
 
-    /// Helper function which applies the `checkpoint_actions_iter` function to a set of
+    /// Helper function which applies the [`CheckpointLogReplayProcessor`] to a set of
     /// input batches and returns the results.
     fn run_checkpoint_test(
         input_batches: Vec<(Box<dyn EngineData>, bool)>,
     ) -> DeltaResult<(Vec<FilteredEngineData>, i64, i64)> {
-        let total_actions = Arc::new(AtomicI64::new(0));
+        let actions_count = Arc::new(AtomicI64::new(0));
         let add_actions_count = Arc::new(AtomicI64::new(0));
-        let results: Vec<_> = checkpoint_actions_iter(
-            input_batches.into_iter().map(Ok),
-            total_actions.clone(),
+        let results: Vec<_> = CheckpointLogReplayProcessor::new(
+            actions_count.clone(),
             add_actions_count.clone(),
-            0,
+            0, // minimum_file_retention_timestamp
         )
-        .try_collect()?;
+        .process_actions_iter(input_batches.into_iter().map(Ok))
+        .collect::<DeltaResult<Vec<_>>>()?;
 
         Ok((
             results,
-            total_actions.load(Ordering::Relaxed),
+            actions_count.load(Ordering::Relaxed),
             add_actions_count.load(Ordering::Relaxed),
         ))
     }
@@ -525,7 +500,7 @@ mod tests {
         let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
             true,
-            vec![true; 8],
+            vec![true; 9],
             0, // minimum_file_retention_timestamp (no expired tombstones)
             false,
             false,
@@ -543,6 +518,7 @@ mod tests {
             false, // Row 5 is a cdc action (excluded)
             false, // Row 6 is a sidecar action (excluded)
             true,  // Row 7 is a txn action (included)
+            false, // Row 8 is a checkpointMetadata action (excluded)
         ];
 
         assert_eq!(visitor.file_actions_count, 2);
@@ -770,13 +746,13 @@ mod tests {
             create_batch(batch2)?,
             create_batch(batch3)?,
         ];
-        let (results, total_actions, add_actions) = run_checkpoint_test(input_batches)?;
+        let (results, actions_count, add_actions) = run_checkpoint_test(input_batches)?;
 
         // Verify results
         assert_eq!(results.len(), 2, "Expected two batches in results");
         assert_eq!(results[0].selection_vector, vec![true, true, true],);
         assert_eq!(results[1].selection_vector, vec![false, false, false, true],);
-        assert_eq!(total_actions, 4);
+        assert_eq!(actions_count, 4);
         assert_eq!(add_actions, 0);
 
         Ok(())
@@ -809,13 +785,13 @@ mod tests {
             create_batch(batch2)?,
             create_batch(batch3)?,
         ];
-        let (results, total_actions, add_actions) = run_checkpoint_test(input_batches)?;
+        let (results, actions_count, add_actions) = run_checkpoint_test(input_batches)?;
 
         // Verify results
         assert_eq!(results.len(), 2); // The third batch should be filtered out since there are no selected actions
         assert_eq!(results[0].selection_vector, vec![true]);
         assert_eq!(results[1].selection_vector, vec![false, true]);
-        assert_eq!(total_actions, 2);
+        assert_eq!(actions_count, 2);
         assert_eq!(add_actions, 1);
 
         Ok(())
@@ -844,13 +820,13 @@ mod tests {
         ];
 
         let input_batches = vec![create_batch(batch1)?, create_batch(batch2)?];
-        let (results, total_actions, add_actions) = run_checkpoint_test(input_batches)?;
+        let (results, actions_count, add_actions) = run_checkpoint_test(input_batches)?;
 
         // Verify results
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].selection_vector, vec![true, true]);
         assert_eq!(results[1].selection_vector, vec![false, false, true]);
-        assert_eq!(total_actions, 3);
+        assert_eq!(actions_count, 3);
         assert_eq!(add_actions, 2);
 
         Ok(())

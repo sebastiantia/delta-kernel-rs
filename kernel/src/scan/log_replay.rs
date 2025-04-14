@@ -38,7 +38,7 @@ use crate::{DeltaResult, Engine, EngineData, Error, ExpressionEvaluator};
 /// produces a [`ScanMetadata`] result. This result includes the transformed batch, a selection
 /// vector indicating which rows are valid, and any row-level transformation expressions that need
 /// to be applied to the selected rows.
-struct ScanLogReplayProcessor {
+pub(crate) struct ScanLogReplayProcessor {
     partition_filter: Option<ExpressionRef>,
     data_skipping_filter: Option<DataSkippingFilter>,
     add_transform: Arc<dyn ExpressionEvaluator>,
