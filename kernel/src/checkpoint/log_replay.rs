@@ -28,14 +28,15 @@
 //!   3. Updates counters and state for cross-batch deduplication
 //!   4. Produces a [`FilteredEngineData`] result which includes a selection vector indicating which
 //!      actions should be included in the checkpoint file
-#[cfg(doc)]
-use crate::actions::CheckpointMetadata;
+//!
+//! [`CheckpointMetadata`]: crate::actions::CheckpointMetadata
 use crate::engine_data::{FilteredEngineData, GetData, RowVisitor, TypedGetData as _};
 use crate::log_replay::{FileActionDeduplicator, FileActionKey, LogReplayProcessor};
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::schema::{column_name, ColumnName, ColumnNamesAndTypes, DataType};
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error};
+
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -502,7 +503,7 @@ mod tests {
         let mut visitor = CheckpointVisitor::new(
             &mut seen_file_keys,
             true,
-            vec![true; 8],
+            vec![true; 9],
             0, // minimum_file_retention_timestamp (no expired tombstones)
             false,
             false,
@@ -520,6 +521,7 @@ mod tests {
             false, // Row 5 is a cdc action (excluded)
             false, // Row 6 is a sidecar action (excluded)
             true,  // Row 7 is a txn action (included)
+            false, // Row 8 is a checkpointMetadata action (excluded)
         ];
 
         assert_eq!(visitor.file_actions_count, 2);
