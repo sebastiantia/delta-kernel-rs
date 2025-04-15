@@ -100,12 +100,15 @@ impl LogReplayProcessor for CheckpointLogReplayProcessor {
         );
         visitor.visit_rows_of(batch.as_ref())?;
 
+        // Update the total actions and add actions counters. Relaxed ordering is sufficient
+        // here as we only care about the total count when writing the _last_checkpoint file.
+        // (the ordering is not important for correctness)
         self.actions_count.fetch_add(
             visitor.file_actions_count + visitor.non_file_actions_count,
-            Ordering::SeqCst,
+            Ordering::Relaxed,
         );
         self.add_actions_count
-            .fetch_add(visitor.add_actions_count, Ordering::SeqCst);
+            .fetch_add(visitor.add_actions_count, Ordering::Relaxed);
 
         // Update protocol and metadata seen flags
         self.seen_protocol = visitor.seen_protocol;

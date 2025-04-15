@@ -292,12 +292,14 @@ impl CheckpointWriter {
             ))
         })?;
 
+        // Ordering does not matter as there are no other threads modifying this counter
+        // at this time (since the checkpoint data iterator has been consumed)
         let checkpoint_metadata = create_last_checkpoint_data(
             engine,
             metadata,
             version,
-            self.total_actions_counter.load(Ordering::SeqCst),
-            self.add_actions_counter.load(Ordering::SeqCst),
+            self.total_actions_counter.load(Ordering::Relaxed),
+            self.add_actions_counter.load(Ordering::Relaxed),
         )?;
 
         let last_checkpoint_path = self
@@ -354,8 +356,7 @@ impl CheckpointWriter {
 
         // Ordering does not matter as there are no other threads modifying this counter
         // at this time (since we have not yet returned the iterator which performs the action counting)
-        self.total_actions_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.total_actions_counter.fetch_add(1, Ordering::Relaxed);
 
         Ok(Some(Ok(result)))
     }
@@ -555,7 +556,7 @@ mod unit_tests {
         .unwrap();
 
         assert_eq!(*record_batch, expected);
-        assert_eq!(writer.total_actions_counter.load(Ordering::SeqCst), 1);
+        assert_eq!(writer.total_actions_counter.load(Ordering::Relaxed), 1);
 
         Ok(())
     }
@@ -571,7 +572,7 @@ mod unit_tests {
 
         // No checkpoint metadata action should be created for V1 checkpoints
         assert!(result.is_none());
-        assert_eq!(writer.total_actions_counter.load(Ordering::SeqCst), 0);
+        assert_eq!(writer.total_actions_counter.load(Ordering::Relaxed), 0);
 
         Ok(())
     }
