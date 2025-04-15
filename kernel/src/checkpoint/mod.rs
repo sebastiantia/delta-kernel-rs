@@ -50,7 +50,9 @@
 //! use delta_kernel::arrow::datatypes::{DataType, Field, Schema};
 //!
 //! fn mock_write_to_object_store(data: CheckpointData) -> DeltaResult<ArrowEngineData> {
-//!     let size: i64 = data.data.map(|r| r.map(|_| 1)).collect::<Result<Vec<_>, _>>()?.into_iter().sum();
+//!     /* This should be replaced with actual object store write logic */
+//!     /* For demonstration, we manually create an EngineData batch with a dummy size */
+//!     let size = data.data.try_fold(0i64, |acc, r| r.map(|_| acc + 1))?;
 //!     let batch = RecordBatch::try_new(
 //!         Arc::new(Schema::new(vec![Field::new("sizeInBytes", DataType::Int64, false)])),
 //!         vec![Arc::new(Int64Array::from(vec![size]))],
@@ -63,9 +65,18 @@
 //!     Arc::new(TokioBackgroundExecutor::new())
 //! );
 //! let table = Table::try_from_uri("./tests/data/app-txn-no-checkpoint")?;
+//!
+//! // Create a checkpoint writer for the table at a specific version
 //! let mut writer = table.checkpoint(&engine, Some(1))?;
+//!
+//! // Write the checkpoint data to the object store and get the metadata
 //! let metadata = mock_write_to_object_store(writer.checkpoint_data(&engine)?)?;
+//!
+//! /* IMPORTANT: All data must be written before finalizing the checkpoint */
+//!
+//!  // Finalize the checkpoint. This call will write the _last_checkpoint file
 //! writer.finalize(&engine, &metadata)?;
+//!
 //! # Ok::<_, Error>(())
 //! ```
 //!
@@ -89,7 +100,7 @@ use crate::expressions::{column_expr, Scalar};
 use crate::log_replay::LogReplayProcessor;
 use crate::path::ParsedLogPath;
 use crate::schema::{DataType, SchemaRef, StructField, StructType};
-use crate::snapshot::Snapshot;
+use crate::snapshot::{Snapshot, LAST_CHECKPOINT_FILE_NAME};
 use crate::{DeltaResult, Engine, EngineData, Error, EvaluationHandlerExtension, Expression};
 use log_replay::CheckpointLogReplayProcessor;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -101,11 +112,6 @@ use url::Url;
 mod log_replay;
 #[cfg(test)]
 mod tests;
-
-/// Name of the `_last_checkpoint`` file that provides metadata about the last checkpoint
-/// created for the table. This file is used as a hint for the engine to quickly locate
-/// the last checkpoint and avoid full log replay when reading the table.
-static LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint.json";
 
 /// Schema of the `_last_checkpoint` file
 /// We cannot use `LastCheckpointInfo::to_schema()` as it would include the 'checkpoint_schema'

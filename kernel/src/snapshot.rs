@@ -15,7 +15,11 @@ use crate::table_features::ColumnMappingMode;
 use crate::table_properties::TableProperties;
 use crate::{DeltaResult, Engine, Error, StorageHandler, Version};
 
-const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
+/// Name of the _last_checkpoint file that provides metadata about the last checkpoint
+/// created for the table. This file is used as a hint for the engine to quickly locate
+/// the last checkpoint and avoid full log replay when reading the table.
+pub(crate) const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
+
 // TODO expose methods for accessing the files of a table (with file pruning).
 /// In-memory representation of a specific snapshot of a Delta table. While a `DeltaTable` exists
 /// throughout time, `Snapshot`s represent a view of a table at a specific point in time; they
