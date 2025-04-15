@@ -36,29 +36,39 @@
 //!
 //! ## Example: Writing a classic-named V1/V2 checkpoint (depending on `v2Checkpoints` feature support)
 //!
-//! TODO(seb): unignore example
-//! ```ignore
-//! let path = "./tests/data/app-txn-no-checkpoint";
-//! let engine = Arc::new(SyncEngine::new());
-//! let table = Table::try_from_uri(path)?;
-//!
-//! // Create a checkpoint writer for the table at a specific version
-//! let mut writer = table.checkpoint(&engine, Some(2))?;
-//!
-//! // Retrieve checkpoint data
-//! let checkpoint_data = writer.checkpoint_data()?;
-//!
-//! // Write checkpoint data to storage (implementation-specific)
-//! let metadata = your_storage_implementation.write_checkpoint(
-//!     &checkpoint_data.path,
-//!     checkpoint_data.data
-//! )?;
-//!
-//! /* IMPORTANT: All data must be written before finalizing the checkpoint */
-//!
-//! // Finalize the checkpoint by writing the _last_checkpoint file
-//! writer.finalize(&engine, &metadata)?;
 //! ```
+//! use std::sync::Arc;
+//! use object_store::local::LocalFileSystem;
+//! use delta_kernel::{
+//!     checkpoint::CheckpointData,
+//!     engine::arrow_data::ArrowEngineData,
+//!     engine::default::{executor::tokio::TokioBackgroundExecutor, DefaultEngine},
+//!     table::Table,
+//!     DeltaResult, Error,
+//! };
+//! use delta_kernel::arrow::array::{Int64Array, RecordBatch};
+//! use delta_kernel::arrow::datatypes::{DataType, Field, Schema};
+//!
+//! fn mock_write_to_object_store(data: CheckpointData) -> DeltaResult<ArrowEngineData> {
+//!     let size: i64 = data.data.map(|r| r.map(|_| 1)).collect::<Result<Vec<_>, _>>()?.into_iter().sum();
+//!     let batch = RecordBatch::try_new(
+//!         Arc::new(Schema::new(vec![Field::new("sizeInBytes", DataType::Int64, false)])),
+//!         vec![Arc::new(Int64Array::from(vec![size]))],
+//!     )?;
+//!     Ok(ArrowEngineData::new(batch))
+//! }
+//!
+//! let engine = DefaultEngine::new(
+//!     Arc::new(LocalFileSystem::new()),
+//!     Arc::new(TokioBackgroundExecutor::new())
+//! );
+//! let table = Table::try_from_uri("./tests/data/app-txn-no-checkpoint")?;
+//! let mut writer = table.checkpoint(&engine, Some(1))?;
+//! let metadata = mock_write_to_object_store(writer.checkpoint_data(&engine)?)?;
+//! writer.finalize(&engine, &metadata)?;
+//! # Ok::<_, Error>(())
+//! ```
+//!
 //! ## Future extensions
 //! - TODO(#836): Single-file UUID-named V2 checkpoints (using `n.checkpoint.u.{json/parquet}` naming) are to be
 //!   implemented in the future. The current implementation only supports classic-named V2 checkpoints.
@@ -259,10 +269,9 @@ impl CheckpointWriter {
 
     /// Finalizes the checkpoint writing process by creating the `_last_checkpoint` file
     ///
-    /// The [`LastCheckpointHint`] (`_last_checkpoint`) file is a metadata file that contains
-    /// information about the last checkpoint created for the table. It is used as a hint
-    /// for the engine to quickly locate the last checkpoint and avoid full log replay when
-    /// reading the table.
+    /// The `_last_checkpoint` file is a metadata file that contains information about the
+    /// last checkpoint created for the table. It is used as a hint for the engine to quickly
+    /// locate the last checkpoint and avoid full log replay when reading the table.
     ///
     /// # Important
     /// This method must only be called AFTER successfully writing all checkpoint data to storage.
