@@ -31,7 +31,7 @@
 //! Handles the actual checkpoint data generation and writing process. It is created via the
 //! [`crate::table::Table::checkpoint`] method and provides the following APIs:
 //! - [`CheckpointWriter::checkpoint_data`] - Returns the checkpoint data and path information
-//! - TODO(#850): [`CheckpointWriter::finalize`] - Writes the `_last_checkpoint` file
+//! - TODO(#850): `CheckpointWriter::finalize` - Writes the `_last_checkpoint` file
 //!
 //! ## Example: Writing a classic-named V1 checkpoint (no `v2Checkpoints` feature on test table)
 //!
