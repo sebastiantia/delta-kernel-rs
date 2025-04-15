@@ -48,7 +48,7 @@
 //! use delta_kernel::arrow::array::{Int64Array, RecordBatch};
 //! use delta_kernel::arrow::datatypes::{DataType, Field, Schema};
 //!
-//! fn mock_write_to_object_store(data: CheckpointData) -> DeltaResult<ArrowEngineData> {
+//! fn mock_write_to_object_store(mut data: CheckpointData) -> DeltaResult<ArrowEngineData> {
 //!     /* This should be replaced with actual object store write logic */
 //!     /* For demonstration, we manually create an EngineData batch with a dummy size */
 //!     let size = data.data.try_fold(0i64, |acc, r| r.map(|_| acc + 1))?;
