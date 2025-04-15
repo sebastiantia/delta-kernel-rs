@@ -26,7 +26,6 @@
 //!
 //! - [`CheckpointWriter`] - Core component that manages checkpoint creation workflow
 //! - [`CheckpointData`] - Contains the data to write and destination path information
-//! - [`crate::log_replay`] submodule - Handles action filtering and deduplication
 //!
 //! ## [`CheckpointWriter`]
 //! Handles the actual checkpoint data generation and writing process. It is created via the
@@ -155,26 +154,6 @@ static CHECKPOINT_METADATA_ACTION_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(||
     .into()
 });
 
-/// Returns the schema for writing the `_last_checkpoint` file
-fn get_last_checkpoint_schema() -> &'static SchemaRef {
-    &LAST_CHECKPOINT_SCHEMA
-}
-
-/// Returns the schema for reading Delta log actions for checkpoint creation
-fn get_checkpoint_actions_schema() -> &'static SchemaRef {
-    &CHECKPOINT_ACTIONS_SCHEMA
-}
-
-/// Returns the schema of the metadata passed to the [`CheckpointWriter::finalize()`] method by the engine
-fn get_engine_checkpoint_metadata_schema() -> &'static SchemaRef {
-    &ENGINE_CHECKPOINT_METADATA_SCHEMA
-}
-
-/// Returns the schema of the [`CheckpointMetadata`] action that is included in V2 checkpoints
-fn get_checkpoint_metadata_action_schema() -> &'static SchemaRef {
-    &CHECKPOINT_METADATA_ACTION_SCHEMA
-}
-
 /// Represents a single-file checkpoint, including the data to write and the target path.
 pub struct CheckpointData {
     /// The URL where the checkpoint file should be written.
@@ -231,11 +210,10 @@ impl CheckpointWriter {
             .table_configuration()
             .is_v2_checkpoint_supported();
 
-        let read_schema = get_checkpoint_actions_schema();
         let actions = self.snapshot.log_segment().read_actions(
             engine,
-            read_schema.clone(),
-            read_schema.clone(),
+            CHECKPOINT_ACTIONS_SCHEMA.clone(),
+            CHECKPOINT_ACTIONS_SCHEMA.clone(),
             None,
         )?;
 
@@ -353,7 +331,7 @@ impl CheckpointWriter {
 
         let checkpoint_metadata_batch = engine
             .evaluation_handler()
-            .create_one(get_checkpoint_metadata_action_schema().clone(), values)?;
+            .create_one(CHECKPOINT_METADATA_ACTION_SCHEMA.clone(), values)?;
 
         let result = FilteredEngineData {
             data: checkpoint_metadata_batch,
@@ -470,9 +448,9 @@ fn create_last_checkpoint_data(
     let last_checkpoint_expr = Expression::struct_from(last_checkpoint_exprs);
 
     let last_checkpoint_metadata_evaluator = engine.evaluation_handler().new_expression_evaluator(
-        get_engine_checkpoint_metadata_schema().clone(),
+        ENGINE_CHECKPOINT_METADATA_SCHEMA.clone(),
         last_checkpoint_expr,
-        get_last_checkpoint_schema().clone().into(),
+        LAST_CHECKPOINT_SCHEMA.clone().into(),
     );
 
     last_checkpoint_metadata_evaluator.evaluate(metadata)
