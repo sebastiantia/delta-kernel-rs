@@ -242,7 +242,7 @@ impl CheckpointWriter {
         .process_actions_iter(actions);
 
         let version = self.snapshot.version().try_into().map_err(|e| {
-            Error::generic(format!(
+            Error::checkpoint_writer(format!(
                 "Failed to convert checkpoint version from u64 {} to i64: {}",
                 self.snapshot.version(),
                 e
@@ -285,8 +285,8 @@ impl CheckpointWriter {
     /// # Returns: [`variant@Ok`] if the `_last_checkpoint` file was written successfully
     pub fn finalize(self, engine: &dyn Engine, metadata: &dyn EngineData) -> DeltaResult<()> {
         let version = self.snapshot.version().try_into().map_err(|e| {
-            Error::generic(format!(
-                "Failed to convert version from u64 {} to i64: {}",
+            Error::checkpoint_writer(format!(
+                "Failed to convert checkpoint version from u64 {} to i64: {}",
                 self.snapshot.version(),
                 e
             ))
@@ -407,12 +407,11 @@ fn deleted_file_retention_timestamp_with_time(
     let now_ms: i64 = now_duration
         .as_millis()
         .try_into()
-        .map_err(|_| Error::generic("Current timestamp exceeds i64 millisecond range"))?;
+        .map_err(|_| Error::checkpoint_writer("Current timestamp exceeds i64 millisecond range"))?;
 
-    let retention_ms: i64 = retention_duration
-        .as_millis()
-        .try_into()
-        .map_err(|_| Error::generic("Retention duration exceeds i64 millisecond range"))?;
+    let retention_ms: i64 = retention_duration.as_millis().try_into().map_err(|_| {
+        Error::checkpoint_writer("Retention duration exceeds i64 millisecond range")
+    })?;
 
     // Simple subtraction - will produce negative values if retention > now
     Ok(now_ms - retention_ms)
@@ -446,8 +445,8 @@ fn create_last_checkpoint_data(
 ) -> DeltaResult<Box<dyn EngineData>> {
     // Validate metadata has exactly one row
     if metadata.len() != 1 {
-        return Err(Error::Generic(format!(
-            "Engine checkpoint metadata should have exactly one row, found {}",
+        return Err(Error::checkpoint_writer(format!(
+            "Engine-collected checkpoint metadata should have exactly one row, found {}",
             metadata.len()
         )));
     }
