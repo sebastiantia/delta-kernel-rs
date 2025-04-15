@@ -34,7 +34,7 @@
 //! - [`CheckpointWriter::checkpoint_data`] - Returns the checkpoint data and path information
 //! - [`CheckpointWriter::finalize`] - Writes the `_last_checkpoint` file
 //!
-//! ## Example: Writing a classic-named V1/V2 checkpoint (depending on `v2Checkpoints` feature support)
+//! ## Example: Writing a classic-named V1 checkpoint (no `v2Checkpoints` feature on test table)
 //!
 //! ```
 //! use std::sync::Arc;
