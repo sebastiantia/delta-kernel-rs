@@ -1,8 +1,13 @@
 //! # Delta Kernel Checkpoint API
 //!
 //! This module implements the API for writing checkpoints in delta tables.
-//! Checkpoints provide a compact summary of the table state, enabling faster recovery by
-//! avoiding full log replay. This API supports two checkpoint types:
+//! Checkpoints allow readers to short-cut the cost of reading the entire log history by providing
+//! the complete replay of all actions, up to and including the checkpointed version, with invalid
+//! actions removed. Invalid actions are those that have been canceled out by subsequent ones (for
+//! example removing a file that has been added), using the rules for reconciliation.
+//!
+//! ## Checkpoint Types
+//! This API supports two checkpoint types:
 //!
 //! 1. **Single-file Classic-named V1 Checkpoint** – for legacy tables that do not support the
 //!    `v2Checkpoints` reader/writer feature. These checkpoints follow the V1 specification and do not
@@ -24,20 +29,21 @@
 //!
 //! ## Architecture
 //!
-//! - [`CheckpointWriter`] - Core component that manages checkpoint creation workflow
+//! - [`CheckpointWriter`] - Core component that manages the checkpoint creation workflow
 //! - [`CheckpointData`] - Contains the data to write and destination path information
 //!
-//! ## [`CheckpointWriter`]
-//! Handles the actual checkpoint data generation and writing process. It is created via the
-//! [`crate::table::Table::checkpoint`] method and provides the following APIs:
-//! - [`CheckpointWriter::checkpoint_data`] - Returns the checkpoint data and path information
-//! - TODO(#850): `CheckpointWriter::finalize` - Writes the `_last_checkpoint` file
+//! ## Usage Workflow
+//!
+//! 1. Create a [`CheckpointWriter`] using [`crate::table::Table::checkpoint`]
+//! 2. Get checkpoint data and path with [`CheckpointWriter::checkpoint_data`]
+//! 3. Write all data to the returned location
+//! 4. TODO(#850) Finalize the checkpoint with `CheckpointWriter::finalize`
+
 //!
 //! ## Example: Writing a classic-named V1 checkpoint (no `v2Checkpoints` feature on test table)
 //!
 //! ```
 //! use std::sync::Arc;
-//! use object_store::local::LocalFileSystem;
 //! use delta_kernel::{
 //!     checkpoint::CheckpointData,
 //!     engine::arrow_data::ArrowEngineData,
@@ -47,6 +53,7 @@
 //! };
 //! use delta_kernel::arrow::array::{Int64Array, RecordBatch};
 //! use delta_kernel::arrow::datatypes::{DataType, Field, Schema};
+//! use object_store::local::LocalFileSystem;
 //!
 //! fn mock_write_to_object_store(mut data: CheckpointData) -> DeltaResult<ArrowEngineData> {
 //!     /* This should be replaced with actual object store write logic */
@@ -90,6 +97,10 @@
 //!
 //! [`CheckpointMetadata`]: crate::actions::CheckpointMetadata
 //! [`LastCheckpointHint`]: crate::snapshot::LastCheckpointHint
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use crate::actions::CHECKPOINT_METADATA_NAME;
 use crate::actions::{
     schemas::GetStructField, Add, Metadata, Protocol, Remove, SetTransaction, Sidecar, ADD_NAME,
@@ -103,12 +114,9 @@ use crate::schema::{DataType, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine, EngineData, Error, EvaluationHandlerExtension};
 use log_replay::CheckpointLogReplayProcessor;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::{
-    sync::{Arc, LazyLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+
 use url::Url;
+
 mod log_replay;
 #[cfg(test)]
 mod tests;
@@ -137,7 +145,20 @@ static CHECKPOINT_METADATA_ACTION_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(||
     .into()
 });
 
-/// Represents a single-file checkpoint, including the data to write and the target path.
+/// Represents the data needed to create a checkpoint file.
+///
+/// Obtained from [`CheckpointWriter::checkpoint_data`], this struct provides both the
+/// location where the checkpoint file should be written and an iterator over the data
+/// that should be included in the checkpoint.
+///
+/// # Fields
+/// - `path`: The URL where the checkpoint file should be written.
+/// - `data`: A boxed iterator that yields checkpoint actions as chunks of [`EngineData`].
+///
+/// # Usagea
+/// 1. Write every action yielded by `data` to persistent storage at the URL specified by `path`.
+/// 2. Ensure that all data is fully persisted before calling `CheckpointWriter::finalize`.
+///    This is crucial to avoid data loss or corruption.
 pub struct CheckpointData {
     /// The URL where the checkpoint file should be written.
     pub path: Url,
@@ -146,10 +167,25 @@ pub struct CheckpointData {
     pub data: Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>>>,
 }
 
-/// Manages the checkpoint writing process for tables
+/// Orchestrates the process of creating and finalizing a checkpoint.
 ///
-/// The [`CheckpointWriter`] orchestrates creating checkpoint data, and finalizing the
-/// checkpoint by writing the `_last_checkpoint` file.
+/// The [`CheckpointWriter`] is the entry point for generating checkpoint data for a Delta table.
+/// It automatically selects the appropriate checkpoint format (V1/V2) based on the table's
+/// feature support.
+///
+/// # Usage Workflow
+/// 1. Create a [`CheckpointWriter`] via [`crate::table::Table::checkpoint`].
+/// 2. Call [`CheckpointWriter::checkpoint_data`] to obtain a [`CheckpointData`] instance.
+/// 3. Write out all actions from the [`CheckpointData::data`] iterator to the destination
+///    specified by [`CheckpointData::path`].
+/// 4. After successfully writing all data, finalize the checkpoint by calling
+///    [`CheckpointWriter::finalize`] to write the `_last_checkpoint` file.
+///
+/// # Important Notes
+/// - The checkpoint data must be fully written to persistent storage before calling `finalize()`
+///   in step 3. Failing to do so may result in data loss or corruption.
+/// - This API automatically selects the appropriate checkpoint format (V1/V2) based on the table's
+///   `v2Checkpoints` feature support.
 pub struct CheckpointWriter {
     /// Reference to the snapshot of the table being checkpointed
     pub(crate) snapshot: Arc<Snapshot>,
@@ -163,7 +199,7 @@ pub struct CheckpointWriter {
 }
 
 impl CheckpointWriter {
-    /// Creates a new CheckpointWriter with the provided checkpoint data and counters
+    /// Creates a new CheckpointWriter from a snapshot
     pub(crate) fn new(snapshot: Arc<Snapshot>) -> Self {
         Self {
             snapshot,
@@ -209,7 +245,7 @@ impl CheckpointWriter {
         .process_actions_iter(actions);
 
         let version = self.snapshot.version().try_into().map_err(|e| {
-            Error::checkpoint_writer(format!(
+            Error::CheckpointWrite(format!(
                 "Failed to convert checkpoint version from u64 {} to i64: {}",
                 self.snapshot.version(),
                 e
@@ -294,8 +330,9 @@ impl CheckpointWriter {
             selection_vector: vec![true], // Include the action in the checkpoint
         };
 
-        // Ordering does not matter as there are no other threads modifying this counter
-        // at this time (since we have not yet returned the iterator which performs the action counting)
+        // Safe to use Relaxed here:
+        // "Incrementing a counter can be safely done by multiple threads using a relaxed fetch_add
+        // if you're not using the counter to synchronize any other accesses." – Rust Atomics and Locks
         self.total_actions_counter.fetch_add(1, Ordering::Relaxed);
 
         Ok(Some(Ok(result)))
@@ -348,11 +385,12 @@ fn deleted_file_retention_timestamp_with_time(
     let now_ms: i64 = now_duration
         .as_millis()
         .try_into()
-        .map_err(|_| Error::checkpoint_writer("Current timestamp exceeds i64 millisecond range"))?;
+        .map_err(|_| Error::checkpoint_write("Current timestamp exceeds i64 millisecond range"))?;
 
-    let retention_ms: i64 = retention_duration.as_millis().try_into().map_err(|_| {
-        Error::checkpoint_writer("Retention duration exceeds i64 millisecond range")
-    })?;
+    let retention_ms: i64 = retention_duration
+        .as_millis()
+        .try_into()
+        .map_err(|_| Error::checkpoint_write("Retention duration exceeds i64 millisecond range"))?;
 
     // Simple subtraction - will produce negative values if retention > now
     Ok(now_ms - retention_ms)
