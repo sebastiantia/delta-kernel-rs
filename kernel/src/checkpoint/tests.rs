@@ -297,7 +297,7 @@ fn test_checkpoint_error_handling_invalid_version() -> DeltaResult<()> {
 
     // Should fail with an appropriate error
     // Returns error: "LogSegment end version 0 not the same as the specified end version 999"
-    // TODO(seb): Returned error should be tailored to checkpoint creation
+    // TODO(#854): Returned error should be tailored to checkpoint creation
     assert!(result.is_err());
 
     Ok(())
