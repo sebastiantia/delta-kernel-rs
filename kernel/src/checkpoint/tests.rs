@@ -9,7 +9,7 @@ use std::sync::{atomic::Ordering, Arc};
 use test_utils::delta_path_for_version;
 use url::Url;
 
-/// TODO(seb): Merge copies and move to `test_utils`
+/// TODO(#855): Merge copies and move to `test_utils`
 /// Create an in-memory store and return the store and the URL for the store's _delta_log directory.
 fn new_in_memory_store() -> (Arc<InMemory>, Url) {
     (
@@ -21,7 +21,7 @@ fn new_in_memory_store() -> (Arc<InMemory>, Url) {
     )
 }
 
-/// TODO(seb): Merge copies and move to `test_utils`
+/// TODO(#855): Merge copies and move to `test_utils`
 /// Writes all actions to a _delta_log json commit file in the store.
 /// This function formats the provided filename into the _delta_log directory.
 fn write_commit_to_store(
