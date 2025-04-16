@@ -269,7 +269,7 @@ impl TableConfiguration {
     /// both the protocol's readerFeatures and writerFeatures.
     ///
     /// See: <https://github.com/delta-io/delta/blob/master/PROTOCOL.md#v2-checkpoint-table-feature>
-    #[cfg_attr(feature = "internal-api", visibility::make(pub))]
+    #[internal_api]
     #[allow(unused)] // needed to compile w/o default features
     pub(crate) fn is_v2_checkpoint_supported(&self) -> bool {
         let read_supported = self
