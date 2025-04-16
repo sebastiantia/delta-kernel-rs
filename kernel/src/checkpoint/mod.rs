@@ -121,6 +121,14 @@ mod log_replay;
 #[cfg(test)]
 mod tests;
 
+const SECONDS_PER_MINUTE: u64 = 60;
+const MINUTES_PER_HOUR: u64 = 60;
+const HOURS_PER_DAY: u64 = 24;
+const DAYS: u64 = 7;
+/// The default retention period for deleted files in seconds.
+/// This is set to 7 days, which is the default in delta-spark.
+const DEFAULT_RETENTION_SECS: u64 = SECONDS_PER_MINUTE * MINUTES_PER_HOUR * HOURS_PER_DAY * DAYS;
+
 /// Schema for extracting relevant actions from log files for checkpoint creation
 static CHECKPOINT_ACTIONS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     StructType::new([
@@ -379,7 +387,7 @@ fn deleted_file_retention_timestamp_with_time(
 ) -> DeltaResult<i64> {
     // Use provided retention duration or default (7 days)
     let retention_duration =
-        retention_duration.unwrap_or_else(|| Duration::from_secs(60 * 60 * 24 * 7));
+        retention_duration.unwrap_or_else(|| Duration::from_secs(DEFAULT_RETENTION_SECS));
 
     // Convert to milliseconds for remove action deletion_timestamp comparison
     let now_ms: i64 = now_duration
