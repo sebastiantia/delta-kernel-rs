@@ -187,7 +187,7 @@ pub struct CheckpointData {
 /// 3. Write out all actions from the [`CheckpointData::data`] iterator to the destination
 ///    specified by [`CheckpointData::path`].
 /// 4. After successfully writing all data, finalize the checkpoint by calling
-///    [`CheckpointWriter::finalize`] to write the `_last_checkpoint` file.
+///    `CheckpointWriter::finalize`] to write the `_last_checkpoint` file.
 ///
 /// # Important Notes
 /// - The checkpoint data must be fully written to persistent storage before calling `finalize()`
@@ -227,10 +227,10 @@ impl CheckpointWriter {
     ///    (i.e., if `v2Checkpoints` feature is supported by table)
     /// 5. Generates the appropriate checkpoint path
     ///
+    /// # Returns: [`CheckpointData`] containing the checkpoint path and data to write
+    ///
     /// # Important: The returned data should be written to persistent storage by the
     /// caller before calling `finalize()` otherwise data loss may occur.
-    ///
-    /// # Returns: [`CheckpointData`] containing the checkpoint path and data to write
     pub fn checkpoint_data(&mut self, engine: &dyn Engine) -> DeltaResult<CheckpointData> {
         let is_v2_checkpoints_supported = self
             .snapshot
