@@ -1,4 +1,4 @@
-//! This module implements the API for writing single-file checkpoints in delta tables.
+//! This module implements the API for writing single-file checkpoints.
 //!
 //! The entry-point for this API is [`Table::checkpoint`].
 //!
@@ -90,7 +90,7 @@
 //!
 //! [`CheckpointMetadata`]: crate::actions::CheckpointMetadata
 //! [`LastCheckpointHint`]: crate::snapshot::LastCheckpointHint
-//! [`Table::checkpoint`]: [`crate::table::Table::checkpoint`]
+//! [`Table::checkpoint`]: crate::table::Table::checkpoint
 // Future extensions
 // - TODO(#836): Single-file UUID-named V2 checkpoints (using `n.checkpoint.u.{json/parquet}` naming) are to be
 //   implemented in the future. The current implementation only supports classic-named V2 checkpoints.
@@ -287,7 +287,6 @@ impl CheckpointWriter {
     ///   - `sizeInBytes` (i64): The size of the written checkpoint file
     ///
     /// # Returns: [`variant@Ok`] if the checkpoint was successfully finalized
-
     #[allow(unused)]
     fn finalize(self, _engine: &dyn Engine, _metadata: &dyn EngineData) -> DeltaResult<()> {
         todo!("Implement the finalize method which will write the _last_checkpoint file")
