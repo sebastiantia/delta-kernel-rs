@@ -100,14 +100,15 @@ impl Table {
         )
     }
 
-    /// Creates a [`CheckpointWriter`] for generating table checkpoints at the specified version.
-    ///
-    /// The checkpoint type is automatically determined based on the table's feature support:
-    /// - Tables supporting `v2Checkpoints` feature -> Creates a Classic-named V2 checkpoint
-    /// - Tables not supporting `v2Checkpoints` feature -> Creates a Classic-named V1 checkpoint
+    /// Creates a [`CheckpointWriter`] for generating checkpoints at the specified table version.
     ///
     /// See the [`crate::checkpoint`] module documentation for more details on checkpoint types
     /// and the overall checkpoint process.    
+    ///
+    /// # Parameters
+    /// - `engine`: Implementation of [`Engine`] apis.
+    /// - `version`: The version of the table to checkpoint. If [`None`], the latest version of the
+    ///   table will be checkpointed.
     pub fn checkpoint(
         &self,
         engine: &dyn Engine,

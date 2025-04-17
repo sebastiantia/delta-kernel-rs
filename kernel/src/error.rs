@@ -211,7 +211,7 @@ pub enum Error {
 
 // Convenience constructors for Error types that take a String argument
 impl Error {
-    pub fn checkpoint_write(msg: impl ToString) -> Self {
+    pub(crate) fn checkpoint_write(msg: impl ToString) -> Self {
         Self::CheckpointWrite(msg.to_string())
     }
 
