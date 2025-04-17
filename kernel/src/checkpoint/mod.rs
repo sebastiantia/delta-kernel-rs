@@ -163,7 +163,7 @@ static CHECKPOINT_METADATA_ACTION_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(||
 /// - `path`: The URL where the checkpoint file should be written.
 /// - `data`: A boxed iterator that yields checkpoint actions as chunks of [`EngineData`].
 ///
-/// # Usagea
+/// # Usage
 /// 1. Write every action yielded by `data` to persistent storage at the URL specified by `path`.
 /// 2. Ensure that all data is fully persisted before calling `CheckpointWriter::finalize`.
 ///    This is crucial to avoid data loss or corruption.
@@ -178,8 +178,8 @@ pub struct CheckpointData {
 /// Orchestrates the process of creating and finalizing a checkpoint.
 ///
 /// The [`CheckpointWriter`] is the entry point for generating checkpoint data for a Delta table.
-/// It automatically selects the appropriate checkpoint format (V1/V2) based on the table's
-/// feature support.
+/// It automatically selects the appropriate checkpoint format (V1/V2) based on whether the table
+/// supports the `v2Checkpoints` reader/writer feature.
 ///
 /// # Usage Workflow
 /// 1. Create a [`CheckpointWriter`] via [`crate::table::Table::checkpoint`].
@@ -280,14 +280,14 @@ impl CheckpointWriter {
 
     /// TODO(#850): Implement the finalize method
     ///
-    /// Finalizes the checkpoint writing process by creating the `_last_checkpoint` file
+    /// Finalizes the checkpoint writing. This function writes the `_last_checkpoint` file
     ///
     /// The `_last_checkpoint` file is a metadata file that contains information about the
     /// last checkpoint created for the table. It is used as a hint for the engine to quickly
     /// locate the last checkpoint and avoid full log replay when reading the table.
     ///
     /// # Important
-    /// This method must only be called AFTER successfully writing all checkpoint data to storage.
+    /// This method must only be called **after** successfully writing all checkpoint data to storage.
     /// Failure to do so may result in data loss.
     ///
     /// # Parameters
