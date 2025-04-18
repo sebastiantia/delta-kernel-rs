@@ -1,8 +1,4 @@
-use std::{
-    path::PathBuf,
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use crate::actions::{Add, Metadata, Protocol, Remove};
 use crate::arrow::array::{ArrayRef, StructArray};
@@ -66,14 +62,14 @@ fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
     let version = 10;
     let writer = CheckpointWriter::new(create_test_snapshot(&engine)?);
 
-    // Test with is_v2_checkpoint = true
-    let checkpoint_data = writer.create_checkpoint_metadata_batch(version, &engine)?;
+    let checkpoint_batch = writer.create_checkpoint_metadata_batch(version, &engine)?;
 
     // Check selection vector has one true value
-    assert_eq!(checkpoint_data.selection_vector, vec![true]);
+    assert_eq!(checkpoint_batch.filtered_data.selection_vector, vec![true]);
 
     // Verify the underlying EngineData contains the expected CheckpointMetadata action
-    let arrow_engine_data = ArrowEngineData::try_from_engine_data(checkpoint_data.data)?;
+    let arrow_engine_data =
+        ArrowEngineData::try_from_engine_data(checkpoint_batch.filtered_data.data)?;
     let record_batch = arrow_engine_data.record_batch();
 
     // Build the expected RecordBatch
@@ -94,7 +90,8 @@ fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
     .unwrap();
 
     assert_eq!(*record_batch, expected);
-    assert_eq!(writer.actions_count.load(Ordering::Relaxed), 1);
+    assert_eq!(checkpoint_batch.actions_count, 1);
+    assert_eq!(checkpoint_batch.add_actions_count, 0);
 
     Ok(())
 }
@@ -233,19 +230,19 @@ fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
     );
 
     // The first batch should be the metadata and protocol actions.
-    let checkpoint_data = data_iter.next().unwrap()?;
-    assert_eq!(checkpoint_data.selection_vector, [true, true]);
+    let batch = data_iter.next().unwrap()?;
+    assert_eq!(batch.selection_vector, [true, true]);
 
     // The second batch should only include the add action as the remove action is expired.
-    let checkpoint_data = data_iter.next().unwrap()?;
-    assert_eq!(checkpoint_data.selection_vector, [true, true]);
+    let batch = data_iter.next().unwrap()?;
+    assert_eq!(batch.selection_vector, [true, true]);
 
     // The third batch should not be included as the selection vector does not
     // contain any true values, as the add action is removed in a following commit.
     assert!(data_iter.next().is_none());
 
-    assert_eq!(writer.actions_count.load(Ordering::Relaxed), 4);
-    assert_eq!(writer.add_actions_count.load(Ordering::Relaxed), 1);
+    assert_eq!(data_iter.actions_count, 4);
+    assert_eq!(data_iter.add_actions_count, 1);
 
     // TODO(#850): Finalize and verify _last_checkpoint
     Ok(())
@@ -291,14 +288,14 @@ fn test_v1_checkpoint_specific_version() -> DeltaResult<()> {
     );
 
     // The first batch should be the metadata and protocol actions.
-    let checkpoint_data = data_iter.next().unwrap()?;
-    assert_eq!(checkpoint_data.selection_vector, [true, true]);
+    let batch = data_iter.next().unwrap()?;
+    assert_eq!(batch.selection_vector, [true, true]);
 
     // No more data should exist because we only requested version 0
     assert!(data_iter.next().is_none());
 
-    assert_eq!(writer.actions_count.load(Ordering::Relaxed), 2);
-    assert_eq!(writer.add_actions_count.load(Ordering::Relaxed), 0);
+    assert_eq!(data_iter.actions_count, 2);
+    assert_eq!(data_iter.add_actions_count, 0);
 
     // TODO(#850): Finalize and verify _last_checkpoint
     Ok(())
@@ -346,22 +343,22 @@ fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
     );
 
     // The first batch should be the metadata and protocol actions.
-    let checkpoint_data = data_iter.next().unwrap()?;
-    assert_eq!(checkpoint_data.selection_vector, [true, true]);
+    let batch = data_iter.next().unwrap()?;
+    assert_eq!(batch.selection_vector, [true, true]);
 
     // The second batch should be the add action as the remove action is expired.
-    let checkpoint_data = data_iter.next().unwrap()?;
-    assert_eq!(checkpoint_data.selection_vector, [true, true]);
+    let batch = data_iter.next().unwrap()?;
+    assert_eq!(batch.selection_vector, [true, true]);
 
     // The third batch should be the CheckpointMetaData action.
-    let checkpoint_data = data_iter.next().unwrap()?;
-    assert_eq!(checkpoint_data.selection_vector, [true]);
+    let batch = data_iter.next().unwrap()?;
+    assert_eq!(batch.selection_vector, [true]);
 
     // No more data should exist
     assert!(data_iter.next().is_none());
 
-    assert_eq!(writer.actions_count.load(Ordering::Relaxed), 5);
-    assert_eq!(writer.add_actions_count.load(Ordering::Relaxed), 1);
+    assert_eq!(data_iter.actions_count, 5);
+    assert_eq!(data_iter.add_actions_count, 1);
 
     // TODO(#850): Finalize and verify _last_checkpoint
     Ok(())

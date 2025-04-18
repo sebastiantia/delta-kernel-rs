@@ -26,7 +26,8 @@
 //! ## Architecture
 //!
 //! - [`CheckpointWriter`] - Core component that manages the checkpoint creation workflow
-//! - [`CheckpointData`] - Contains the data to write and destination path information
+//! - [`CheckpointData`] - Wraps the [`CheckpointDataIterator`] and destination path information
+//! - [`CheckpointDataIterator`] - Iterator over the checkpoint data to be written
 //!
 //! ## Usage
 //!
@@ -96,7 +97,7 @@
 //   implemented in the future. The current implementation only supports classic-named V2 checkpoints.
 // - TODO(#837): Multi-file V2 checkpoints are not supported yet. The API is designed to be extensible for future
 //   multi-file support, but the current implementation only supports single-file checkpoints.
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -112,7 +113,7 @@ use crate::path::ParsedLogPath;
 use crate::schema::{DataType, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine, EngineData, Error, EvaluationHandlerExtension};
-use log_replay::CheckpointLogReplayProcessor;
+use log_replay::{CheckpointBatch, CheckpointLogReplayProcessor};
 
 use url::Url;
 
@@ -152,6 +153,80 @@ static CHECKPOINT_METADATA_ACTION_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(||
     .into()
 });
 
+/// This struct is used to send the total action counts from the [`CheckpointDataIterator`]
+/// to the [`CheckpointWriter`] when the iterator is dropped over a [`channel`]. The counts are
+/// used to populate the `_last_checkpoint` file on [`CheckpointWriter::finalize`].
+#[allow(unused)] // TODO(#850): Read when implementing finalize
+struct CheckpointCounts {
+    /// Total number of actions included in the checkpoint
+    actions_count: i64,
+    /// Number of add actions included in the checkpoint
+    add_actions_count: i64,
+}
+
+/// An iterator over the checkpoint data to be written to the file.
+///
+/// This iterator yields filtered checkpoint data batches ([`FilteredEngineData`]) and
+/// tracks action statistics required for finalizing the checkpoint. It must be fully consumed
+/// before calling [`CheckpointWriter::finalize`], or finalization will fail. Furthermore,
+/// the yielded data must be written to the specified path before finalization, or it will
+/// may result in data loss and corruption.
+///
+/// On drop, sends accumulated action counts to the writer for metadata recording.
+pub struct CheckpointDataIterator {
+    /// The inner iterator that yields the checkpoint data with counts
+    inner: Box<dyn Iterator<Item = DeltaResult<CheckpointBatch>>>,
+    /// Channel sender for action counts
+    counts_tx: Sender<CheckpointCounts>,
+    /// Running total of actions included in the checkpoint
+    actions_count: i64,
+    /// Running total of add actions included in the checkpoint
+    add_actions_count: i64,
+}
+
+impl Iterator for CheckpointDataIterator {
+    type Item = DeltaResult<FilteredEngineData>;
+
+    /// Advances the iterator and returns the next value.
+    ///
+    /// This implementation transforms the [`CheckpointBatch`] items from the inner iterator into
+    /// [`FilteredEngineData`] items for the engine to write, while accumulating action counts for
+    /// each batch. When the iterator is dropped, it sends the accumulated counts to the [`CheckpointWriter`]
+    /// through a [`channel`] to be later used in [`CheckpointWriter::finalize`].
+    fn next(&mut self) -> Option<Self::Item> {
+        // Get the next batch from the inner iterator
+        self.inner.next().map(|result| {
+            result.map(|batch| {
+                // Accumulate counts
+                self.actions_count += batch.actions_count;
+                self.add_actions_count += batch.add_actions_count;
+
+                // Return just the filtered data
+                batch.filtered_data
+            })
+        })
+    }
+}
+
+impl Drop for CheckpointDataIterator {
+    /// Sends accumulated action counts when the iterator is dropped.
+    ///
+    /// This method is called automatically when the iterator goes out of scope,
+    /// which happens either when it is fully consumed or when it is explicitly dropped.
+    /// The accumulated counts are sent to the [`CheckpointWriter`] through a channel,
+    /// where they are used during finalization to write the `_last_checkpoint` file.
+    fn drop(&mut self) {
+        // Send accumulated counts when the iterator is dropped
+        let counts = CheckpointCounts {
+            actions_count: self.actions_count,
+            add_actions_count: self.add_actions_count,
+        };
+
+        // Ignore send errors - they will be handled on the receiving end
+        let _ = self.counts_tx.send(counts);
+    }
+}
+
 /// Represents the data needed to create a single-file checkpoint.
 ///
 /// Obtained from [`CheckpointWriter::checkpoint_data`], this struct provides both the
@@ -159,14 +234,14 @@ static CHECKPOINT_METADATA_ACTION_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(||
 /// that should be included in the checkpoint.
 ///
 /// # Warning
-/// All data must be fully written to persistent storage before calling
+/// The [`CheckpointDataIterator`] must be fully consumed to ensure proper collection of statistics for
+/// the checkpoint. Additionally, all yielded data must be written to the specified path before calling
 /// `CheckpointWriter::finalize`. Failing to do so may result in data loss or corruption.
 pub struct CheckpointData {
     /// The URL where the checkpoint file should be written.
     pub path: Url,
-
     /// An iterator over the checkpoint data to be written to the file.
-    pub data: Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>>>,
+    pub data: CheckpointDataIterator,
 }
 
 /// Orchestrates the process of creating a checkpoint for a table.
@@ -186,22 +261,20 @@ pub struct CheckpointData {
 pub struct CheckpointWriter {
     /// Reference to the snapshot (i.e. version) of the table being checkpointed
     pub(crate) snapshot: Arc<Snapshot>,
-    /// Note: `Arc<AtomicI64>` provides shared mutability for our counters, allowing the
-    /// returned actions iterator from `.checkpoint_data()` to update the counters,
-    /// and the [`CheckpointWriter`] to read them during `.finalize()`
-    /// Counter for total actions included in the checkpoint
-    pub(crate) actions_count: Arc<AtomicI64>,
-    /// Counter for Add actions included in the checkpoint
-    pub(crate) add_actions_count: Arc<AtomicI64>,
+    /// Channel receiver for action counts from the [`CheckpointDataIterator`]
+    counts_rx: Receiver<CheckpointCounts>,
+    /// Channel sender for action counts for the [`CheckpointDataIterator`]
+    counts_tx: Sender<CheckpointCounts>,
 }
 
 impl CheckpointWriter {
     /// Creates a new CheckpointWriter from a snapshot
     pub(crate) fn new(snapshot: Arc<Snapshot>) -> Self {
+        let (counts_tx, counts_rx) = channel();
         Self {
             snapshot,
-            actions_count: Arc::new(AtomicI64::new(0)),
-            add_actions_count: Arc::new(AtomicI64::new(0)),
+            counts_rx,
+            counts_tx,
         }
     }
 
@@ -237,12 +310,9 @@ impl CheckpointWriter {
         )?;
 
         // Create iterator over actions for checkpoint data
-        let checkpoint_data = CheckpointLogReplayProcessor::new(
-            self.actions_count.clone(),
-            self.add_actions_count.clone(),
-            self.deleted_file_retention_timestamp()?,
-        )
-        .process_actions_iter(actions);
+        let checkpoint_data =
+            CheckpointLogReplayProcessor::new(self.deleted_file_retention_timestamp()?)
+                .process_actions_iter(actions);
 
         let version = self.snapshot.version().try_into().map_err(|e| {
             Error::CheckpointWrite(format!(
@@ -263,22 +333,27 @@ impl CheckpointWriter {
             self.snapshot.version(),
         )?;
 
+        // Wrap the data iterator to send counts to the CheckpointWriter when dropped
+        let wrapped_iterator = CheckpointDataIterator {
+            inner: Box::new(chained),
+            counts_tx: self.counts_tx.clone(),
+            actions_count: 0,
+            add_actions_count: 0,
+        };
+
         Ok(CheckpointData {
             path: checkpoint_path.location,
-            data: Box::new(chained),
+            data: wrapped_iterator,
         })
     }
 
     /// TODO(#850): Implement the finalize method
     ///
-    /// Finalize the checkpoint writing process.
+    /// Finalizes checkpoint creation after verifying all data is persisted.
     ///
-    /// Internally, this method writes a last checkpoint hint which contains metadata about the
-    /// written checkpoint.
-    ///
-    /// # Important
-    /// This method must only be called **after** successfully writing all checkpoint data to storage.
-    /// Failure to do so may result in data loss.
+    /// This method **must** be called only after:
+    /// 1. The checkpoint data iterator has been fully consumed
+    /// 2. All data has been successfully written to object storage
     ///
     /// # Parameters
     /// - `engine`: Implementation of [`Engine`] apis.
@@ -288,7 +363,19 @@ impl CheckpointWriter {
     /// # Returns: [`variant@Ok`] if the checkpoint was successfully finalized
     #[allow(unused)]
     fn finalize(self, _engine: &dyn Engine, _metadata: &dyn EngineData) -> DeltaResult<()> {
-        todo!("Implement the finalize method which will write the _last_checkpoint file")
+        // The method validates iterator consumption, but can not garuntee data persistence.
+        match self.counts_rx.try_recv() {
+            Ok(counts) => {
+                // Write the _last_checkpoint file with the action counts
+                todo!("Implement the finalize method which will write the _last_checkpoint file")
+            }
+            Err(_) => {
+                // The iterator wasn't fully consumed, which means not all data was written
+                return Err(Error::checkpoint_write(
+                    "Checkpoint data iterator was not fully consumed before finalization",
+                ));
+            }
+        }
     }
 
     /// Creates the checkpoint metadata action for V2 checkpoints.
@@ -304,31 +391,30 @@ impl CheckpointWriter {
     /// include the additional metadata field `tags` when map support is added.
     ///
     /// # Returns:
-    /// A [`FilteredEngineData`] batch including the single-row [`EngineData`] batch along with
+    /// A [`CheckpointBatch`] batch including the single-row [`EngineData`] batch along with
     /// an accompanying selection vector with a single `true` value, indicating the action in
     /// batch should be included in the checkpoint.
     fn create_checkpoint_metadata_batch(
         &self,
         version: i64,
         engine: &dyn Engine,
-    ) -> DeltaResult<FilteredEngineData> {
+    ) -> DeltaResult<CheckpointBatch> {
         let values: &[Scalar] = &[version.into()];
 
         let checkpoint_metadata_batch = engine
             .evaluation_handler()
             .create_one(CHECKPOINT_METADATA_ACTION_SCHEMA.clone(), values)?;
 
-        let result = FilteredEngineData {
+        let filtered_data = FilteredEngineData {
             data: checkpoint_metadata_batch,
             selection_vector: vec![true], // Include the action in the checkpoint
         };
 
-        // Safe to use Relaxed here:
-        // "Incrementing a counter can be safely done by multiple threads using a relaxed fetch_add
-        // if you're not using the counter to synchronize any other accesses." – Rust Atomics and Locks
-        self.actions_count.fetch_add(1, Ordering::Relaxed);
-
-        Ok(result)
+        Ok(CheckpointBatch {
+            filtered_data,
+            actions_count: 1,
+            add_actions_count: 0,
+        })
     }
 
     /// Calculates the cutoff timestamp for deleted file cleanup.
