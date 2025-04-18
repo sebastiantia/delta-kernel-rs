@@ -253,11 +253,10 @@ impl CheckpointWriter {
         })?;
 
         // Chain the checkpoint metadata action if using V2 checkpoints
-        let chained = checkpoint_data.chain(self.create_checkpoint_metadata_batch(
-            version,
-            engine,
-            is_v2_checkpoints_supported,
-        )?);
+        let chained = checkpoint_data.chain(
+            is_v2_checkpoints_supported
+                .then(|| Ok(self.create_checkpoint_metadata_batch(version, engine)?)),
+        );
 
         let checkpoint_path = ParsedLogPath::new_classic_parquet_checkpoint(
             self.snapshot.table_root(),
@@ -294,10 +293,9 @@ impl CheckpointWriter {
 
     /// Creates the checkpoint metadata action for V2 checkpoints.
     ///
-    /// For V2 checkpoints, this function generates the [`CheckpointMetadata`] action
-    /// that must be included in the V2 spec checkpoint file. This action contains metadata
-    /// about the checkpoint, particularly its version. For V1 checkpoints, this function
-    /// returns `None`, as the V1 checkpoint schema does not include this action type.
+    /// This function generates the [`CheckpointMetadata`] action that must be included in the
+    /// V2 spec checkpoint file. This action contains metadata about the checkpoint, particularly
+    /// its version.
     ///
     /// # Implementation Details
     ///
@@ -313,11 +311,7 @@ impl CheckpointWriter {
         &self,
         version: i64,
         engine: &dyn Engine,
-        is_v2_checkpoint: bool,
-    ) -> DeltaResult<Option<DeltaResult<FilteredEngineData>>> {
-        if !is_v2_checkpoint {
-            return Ok(None);
-        }
+    ) -> DeltaResult<FilteredEngineData> {
         let values: &[Scalar] = &[version.into()];
 
         let checkpoint_metadata_batch = engine
@@ -334,7 +328,7 @@ impl CheckpointWriter {
         // if you're not using the counter to synchronize any other accesses." – Rust Atomics and Locks
         self.actions_count.fetch_add(1, Ordering::Relaxed);
 
-        Ok(Some(Ok(result)))
+        Ok(result)
     }
 
     /// Calculates the cutoff timestamp for deleted file cleanup.

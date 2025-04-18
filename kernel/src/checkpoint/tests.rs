@@ -61,15 +61,13 @@ fn create_test_snapshot(engine: &dyn Engine) -> DeltaResult<Arc<Snapshot>> {
 }
 
 #[test]
-fn test_create_checkpoint_metadata_batch_when_v2_checkpoints_is_supported() -> DeltaResult<()> {
+fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
     let engine = SyncEngine::new();
     let version = 10;
     let writer = CheckpointWriter::new(create_test_snapshot(&engine)?);
 
     // Test with is_v2_checkpoint = true
-    let result = writer.create_checkpoint_metadata_batch(version, &engine, true)?;
-    assert!(result.is_some());
-    let checkpoint_data = result.unwrap()?;
+    let checkpoint_data = writer.create_checkpoint_metadata_batch(version, &engine)?;
 
     // Check selection vector has one true value
     assert_eq!(checkpoint_data.selection_vector, vec![true]);
@@ -97,21 +95,6 @@ fn test_create_checkpoint_metadata_batch_when_v2_checkpoints_is_supported() -> D
 
     assert_eq!(*record_batch, expected);
     assert_eq!(writer.actions_count.load(Ordering::Relaxed), 1);
-
-    Ok(())
-}
-
-#[test]
-fn test_create_checkpoint_metadata_batch_when_v2_checkpoints_not_supported() -> DeltaResult<()> {
-    let engine = SyncEngine::new();
-    let writer = CheckpointWriter::new(create_test_snapshot(&engine)?);
-
-    // Test with is_v2_checkpoint = false
-    let result = writer.create_checkpoint_metadata_batch(10, &engine, false)?;
-
-    // No checkpoint metadata action should be created for V1 checkpoints
-    assert!(result.is_none());
-    assert_eq!(writer.actions_count.load(Ordering::Relaxed), 0);
 
     Ok(())
 }
