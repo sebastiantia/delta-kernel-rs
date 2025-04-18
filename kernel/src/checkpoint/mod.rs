@@ -168,7 +168,7 @@ struct CheckpointCounts {
 ///
 /// This iterator yields filtered checkpoint data batches ([`FilteredEngineData`]) and
 /// tracks action statistics required for finalizing the checkpoint. It must be fully consumed
-/// before calling [`CheckpointWriter::finalize`], or finalization will fail. Furthermore,
+/// before calling `CheckpointWriter::finalize`, or finalization will fail. Furthermore,
 /// the yielded data must be written to the specified path before finalization, or it will
 /// may result in data loss and corruption.
 ///
@@ -189,7 +189,7 @@ impl Iterator for CheckpointDataIterator {
 
     /// Advances the iterator and returns the next value.
     ///
-    /// This implementation transforms the [`CheckpointBatch`] items from the inner iterator into
+    /// This implementation transforms the `CheckpointBatch` items from the inner iterator into
     /// [`FilteredEngineData`] items for the engine to write, while accumulating action counts for
     /// each batch. When the iterator is dropped, it sends the accumulated counts to the [`CheckpointWriter`]
     /// through a [`channel`] to be later used in [`CheckpointWriter::finalize`].
@@ -325,7 +325,7 @@ impl CheckpointWriter {
         // Chain the checkpoint metadata action if using V2 checkpoints
         let chained = checkpoint_data.chain(
             is_v2_checkpoints_supported
-                .then(|| Ok(self.create_checkpoint_metadata_batch(version, engine)?)),
+                .then(|| self.create_checkpoint_metadata_batch(version, engine)),
         );
 
         let checkpoint_path = ParsedLogPath::new_classic_parquet_checkpoint(
@@ -371,9 +371,9 @@ impl CheckpointWriter {
             }
             Err(_) => {
                 // The iterator wasn't fully consumed, which means not all data was written
-                return Err(Error::checkpoint_write(
+                Err(Error::checkpoint_write(
                     "Checkpoint data iterator was not fully consumed before finalization",
-                ));
+                ))
             }
         }
     }
