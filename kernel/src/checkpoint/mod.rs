@@ -2,26 +2,16 @@
 //!
 //! The entry-point for this API is [`Table::checkpoint`].
 //!
-//! ## Checkpoint Types
-//! This API supports two checkpoint types:
+//! ## Checkpoint Types and Selection Logic
+//! This API supports two checkpoint types, selected based on table features:
 //!
-//! 1. **Single-file Classic-named V1 Checkpoint** – for legacy tables that do not support the
-//!    `v2Checkpoints` reader/writer feature. These checkpoints follow the V1 specification and do not
-//!    include a [`CheckpointMetadata`] action.
-//! 2. **Single-file Classic-named V2 Checkpoint** – for tables supporting the `v2Checkpoints` feature.
-//!    These checkpoints follow the V2 specification and include a [`CheckpointMetadata`] action, while
-//!    maintaining backwards compatibility by using classic-naming that legacy readers can recognize.
+//! | Table Feature    | Resulting Checkpoint Type    | Description                                                                 |
+//! |------------------|-------------------------------|-----------------------------------------------------------------------------|
+//! | No v2Checkpoints | Single-file Classic-named V1 | Follows V1 specification without [`CheckpointMetadata`] action             |
+//! | v2Checkpoints    | Single-file Classic-named V2 | Follows V2 specification with [`CheckpointMetadata`] action while maintaining backward compatibility via classic naming |
 //!
 //! For more information on the V1/V2 specifications, see the following protocol section:
 //! <https://github.com/delta-io/delta/blob/master/PROTOCOL.md#checkpoint-specs>
-//!
-//! ## Checkpoint Selection Logic
-//! The checkpoint type is determined by whether the table supports the `v2Checkpoints` reader/writer feature:
-//!
-//! | Table Feature    | Resulting Checkpoint Type     |
-//! |------------------|-------------------------------|
-//! | No v2Checkpoints | Single-file Classic-named V1  |
-//! | v2Checkpoints    | Single-file Classic-named V2  |
 //!
 //! ## Architecture
 //!
@@ -50,7 +40,7 @@
 //! # use delta_kernel::arrow::datatypes::{DataType, Field, Schema};
 //! # use object_store::local::LocalFileSystem;
 //! // Example function which writes checkpoint data to storage
-//! fn write_files(mut data: CheckpointData) -> DeltaResult<ArrowEngineData> {
+//! fn write_checkpoint_file(mut data: CheckpointData) -> DeltaResult<ArrowEngineData> {
 //!     /* This should be replaced with actual object store write logic */
 //!     /* For demonstration, we manually create an EngineData batch with a dummy size */
 //!     let size = data.data.try_fold(0i64, |acc, r| r.map(|_| acc + 1))?;
@@ -75,7 +65,7 @@
 //! let mut writer = table.checkpoint(&engine, Some(1))?;
 //!
 //! // Write the checkpoint data to the object store and get the metadata
-//! let metadata = write_files(writer.checkpoint_data(&engine)?)?;
+//! let metadata = write_checkpoint_file(writer.checkpoint_data(&engine)?)?;
 //!
 //! /* IMPORTANT: All data must be written before finalizing the checkpoint */
 //!
@@ -167,10 +157,15 @@ struct CheckpointCounts {
 /// An iterator over the checkpoint data to be written to the file.
 ///
 /// This iterator yields filtered checkpoint data batches ([`FilteredEngineData`]) and
-/// tracks action statistics required for finalizing the checkpoint. It must be fully consumed
-/// before calling `CheckpointWriter::finalize`, or finalization will fail. Furthermore,
-/// the yielded data must be written to the specified path before finalization, or it will
-/// may result in data loss and corruption.
+/// tracks action statistics required for finalizing the checkpoint.
+///
+/// # Warning
+/// This iterator MUST be fully consumed before it is dropped. If the iterator is dropped
+/// before being fully consumed, it will panic with the message:
+/// "CheckpointDataIterator was dropped before being fully consumed".
+///
+/// Additionally, all yielded data must be written to the specified path before calling
+/// `CheckpointWriter::finalize`, or it may result in data loss and corruption.
 ///
 /// On drop, sends accumulated action counts to the writer for metadata recording.
 pub struct CheckpointDataIterator {
@@ -182,6 +177,8 @@ pub struct CheckpointDataIterator {
     actions_count: i64,
     /// Running total of add actions included in the checkpoint
     add_actions_count: i64,
+    /// Flag indicating whether the iterator has been fully consumed
+    fully_consumed: bool,
 }
 
 impl Iterator for CheckpointDataIterator {
@@ -194,14 +191,17 @@ impl Iterator for CheckpointDataIterator {
     /// each batch. When the iterator is dropped, it sends the accumulated counts to the [`CheckpointWriter`]
     /// through a [`channel`] to be later used in [`CheckpointWriter::finalize`].
     fn next(&mut self) -> Option<Self::Item> {
-        // Get the next batch from the inner iterator
-        self.inner.next().map(|result| {
+        let next_item = self.inner.next();
+
+        // Check if the iterator is fully consumed
+        if next_item.is_none() {
+            self.fully_consumed = true;
+        }
+
+        next_item.map(|result| {
             result.map(|batch| {
-                // Accumulate counts
                 self.actions_count += batch.actions_count;
                 self.add_actions_count += batch.add_actions_count;
-
-                // Return just the filtered data
                 batch.filtered_data
             })
         })
@@ -216,7 +216,11 @@ impl Drop for CheckpointDataIterator {
     /// The accumulated counts are sent to the [`CheckpointWriter`] through a channel,
     /// where they are used during finalization to write the `_last_checkpoint` file.
     fn drop(&mut self) {
-        // Send accumulated counts when the iterator is dropped
+        assert!(
+            self.fully_consumed,
+            "CheckpointDataIterator was dropped before being fully consumed"
+        );
+
         let counts = CheckpointCounts {
             actions_count: self.actions_count,
             add_actions_count: self.add_actions_count,
@@ -339,6 +343,7 @@ impl CheckpointWriter {
             counts_tx: self.counts_tx.clone(),
             actions_count: 0,
             add_actions_count: 0,
+            fully_consumed: false,
         };
 
         Ok(CheckpointData {
@@ -363,7 +368,7 @@ impl CheckpointWriter {
     /// # Returns: [`variant@Ok`] if the checkpoint was successfully finalized
     #[allow(unused)]
     fn finalize(self, _engine: &dyn Engine, _metadata: &dyn EngineData) -> DeltaResult<()> {
-        // The method validates iterator consumption, but can not garuntee data persistence.
+        // The method validates iterator consumption, but can not guaruntee data persistence.
         match self.counts_rx.try_recv() {
             Ok(counts) => {
                 // Write the _last_checkpoint file with the action counts

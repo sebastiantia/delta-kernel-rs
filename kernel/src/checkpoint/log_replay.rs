@@ -461,10 +461,13 @@ impl RowVisitor for CheckpointVisitor<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::arrow::array::StringArray;
     use crate::utils::test_utils::{action_batch, parse_json_batch};
-    use std::collections::HashSet;
+
+    use itertools::Itertools;
 
     /// Helper function to create test batches from JSON strings
     fn create_batch(json_strings: Vec<&str>) -> DeltaResult<(Box<dyn EngineData>, bool)> {
@@ -476,9 +479,9 @@ mod tests {
     fn run_checkpoint_test(
         input_batches: Vec<(Box<dyn EngineData>, bool)>,
     ) -> DeltaResult<(Vec<FilteredEngineData>, i64, i64)> {
-        let processed_batches = CheckpointLogReplayProcessor::new(0)
+        let processed_batches: Vec<_> = CheckpointLogReplayProcessor::new(0)
             .process_actions_iter(input_batches.into_iter().map(Ok))
-            .collect::<DeltaResult<Vec<_>>>()?;
+            .try_collect()?;
         let total_count: i64 = processed_batches.iter().map(|b| b.actions_count).sum();
         let add_count: i64 = processed_batches.iter().map(|b| b.add_actions_count).sum();
         let filtered_data = processed_batches
