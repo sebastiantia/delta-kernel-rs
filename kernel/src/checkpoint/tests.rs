@@ -389,23 +389,3 @@ fn test_checkpoint_error_handling_invalid_version() -> DeltaResult<()> {
 
     Ok(())
 }
-
-#[test]
-#[should_panic(expected = "CheckpointDataIterator was dropped before being fully consumed")]
-fn test_checkpoint_data_iterator_panics_when_dropped_and_not_consumed() {
-    let (store, _) = new_in_memory_store();
-    let engine = DefaultEngine::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
-    write_commit_to_store(
-        &store,
-        vec![create_basic_protocol_action(), create_metadata_action()],
-        0,
-    )
-    .unwrap();
-    let table_root = Url::parse("memory:///").unwrap();
-    let table = Table::new(table_root);
-    let mut writer = table.checkpoint(&engine, None).unwrap();
-    let _checkpoint_data_iterator = writer.checkpoint_data(&engine).unwrap().data;
-
-    // We do not call `next()` at all. The iterator will panic when it goes out of scope
-    // at the end of this test as it is not fully consumed.
-}
