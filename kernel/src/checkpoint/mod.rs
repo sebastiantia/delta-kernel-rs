@@ -368,7 +368,7 @@ impl CheckpointWriter {
     /// # Returns: [`variant@Ok`] if the checkpoint was successfully finalized
     #[allow(unused)]
     fn finalize(self, _engine: &dyn Engine, _metadata: &dyn EngineData) -> DeltaResult<()> {
-        // The method validates iterator consumption, but can not guaruntee data persistence.
+        // The method validates iterator consumption, but can not guarantee data persistence.
         match self.counts_rx.try_recv() {
             Ok(counts) => {
                 // Write the _last_checkpoint file with the action counts
