@@ -24,9 +24,10 @@
 //! The following steps outline the process of creating a checkpoint:
 //!
 //! 1. Create a [`CheckpointWriter`] using [`Table::checkpoint`]
-//! 2. Get checkpoint data and path with [`CheckpointWriter::checkpoint_data`]
-//! 3. Write the [`CheckpointDataIterator`] returned in [`CheckpointData`] to [`CheckpointData::path`]
-//! 4. Finalize the checkpoint with `CheckpointWriter::finalize`
+//! 2. Get [`CheckpointData`] from [`CheckpointWriter::checkpoint_data`]
+//! 3. Write the [`CheckpointData::data`] to [`CheckpointData::path`]
+//! 4. Collect metadata ([`FileMeta`]) from the write operation
+//! 5. Pass the metadata and [`CheckpointDataIterator`] to [`CheckpointWriter::finalize`] to finalize the checkpoint
 //!
 //! ```no_run
 //! # use std::sync::Arc;
