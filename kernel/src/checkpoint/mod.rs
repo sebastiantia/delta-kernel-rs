@@ -25,7 +25,7 @@
 //!
 //! 1. Create a [`CheckpointWriter`] using [`Table::checkpoint`]
 //! 2. Get checkpoint data and path with [`CheckpointWriter::checkpoint_data`]
-//! 3. Write all data to the returned location
+//! 3. Write the [`CheckpointDataIterator`] returned in [`CheckpointData`] to [`CheckpointData::path`]
 //! 4. Finalize the checkpoint with `CheckpointWriter::finalize`
 //!
 //! ```no_run
@@ -42,17 +42,16 @@
 //! }
 //!
 //! // Create an engine instance
-//! let engine = todo!();
+//! let engine: Arc<dyn Engine> = Arc::new(todo!("create your engine here"));
 //!
 //! // Create a table instance for the table you want to checkpoint
 //! let table = Table::try_from_uri("./tests/data/app-txn-no-checkpoint")?;
 //!
-//! // Use table.checkpoint() to create a checkpoint writer
-//! // (optionally specify a version to checkpoint)
+//! // Create a checkpoint writer for a version of the table (`None` for latest)
 //! let mut writer: CheckpointWriter = table.checkpoint(&engine, Some(1))?;
 //!
 //! // Get the checkpoint data and path
-//! let checkpoint_data = writer.checkpoint_data(&engine)?
+//! let checkpoint_data = writer.checkpoint_data(&engine)?;
 //!
 //! // Write the checkpoint data to the object store and collect metadata
 //! let metadata: FileMeta = write_checkpoint_file(&checkpoint_data)?;
