@@ -114,33 +114,30 @@ mod tests;
 const SECONDS_PER_MINUTE: u64 = 60;
 const MINUTES_PER_HOUR: u64 = 60;
 const HOURS_PER_DAY: u64 = 24;
-const DAYS: u64 = 7;
 /// The default retention period for deleted files in seconds.
 /// This is set to 7 days, which is the default in delta-spark.
-const DEFAULT_RETENTION_SECS: u64 = SECONDS_PER_MINUTE * MINUTES_PER_HOUR * HOURS_PER_DAY * DAYS;
+const DEFAULT_RETENTION_SECS: u64 = 7 * HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE;
 
 /// Schema for extracting relevant actions from log files for checkpoint creation
 static CHECKPOINT_ACTIONS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    StructType::new([
+    Arc::new(StructType::new([
         Option::<Add>::get_struct_field(ADD_NAME),
         Option::<Remove>::get_struct_field(REMOVE_NAME),
         Option::<Metadata>::get_struct_field(METADATA_NAME),
         Option::<Protocol>::get_struct_field(PROTOCOL_NAME),
         Option::<SetTransaction>::get_struct_field(SET_TRANSACTION_NAME),
         Option::<Sidecar>::get_struct_field(SIDECAR_NAME),
-    ])
-    .into()
+    ]))
 });
 
 // Schema of the [`CheckpointMetadata`] action that is included in V2 checkpoints
 // We cannot use `CheckpointMetadata::to_schema()` as it would include the 'tags' field which
 // we're not supporting yet due to the lack of map support.
 static CHECKPOINT_METADATA_ACTION_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    StructType::new([StructField::not_null(
+    Arc::new(StructType::new([StructField::not_null(
         CHECKPOINT_METADATA_NAME,
         DataType::struct_type([StructField::not_null("version", DataType::LONG)]),
-    )])
-    .into()
+    )]))
 });
 
 /// This struct is used to send the total action counts from the [`CheckpointDataIterator`]
@@ -404,11 +401,10 @@ impl CheckpointWriter {
         version: i64,
         engine: &dyn Engine,
     ) -> DeltaResult<CheckpointBatch> {
-        let values: &[Scalar] = &[version.into()];
-
-        let checkpoint_metadata_batch = engine
-            .evaluation_handler()
-            .create_one(CHECKPOINT_METADATA_ACTION_SCHEMA.clone(), values)?;
+        let checkpoint_metadata_batch = engine.evaluation_handler().create_one(
+            CHECKPOINT_METADATA_ACTION_SCHEMA.clone(),
+            &[Scalar::from(version)],
+        )?;
 
         let filtered_data = FilteredEngineData {
             data: checkpoint_metadata_batch,
