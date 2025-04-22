@@ -221,25 +221,24 @@ fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
     let table = Table::new(table_root);
     let snapshot = table.snapshot(&engine, None)?;
     let mut writer = snapshot.checkpoint()?;
-    let checkpoint_data = writer.checkpoint_data(&engine)?;
-    let mut data_iter = checkpoint_data.data;
 
     // Verify the checkpoint file path is the latest version by default.
     assert_eq!(
-        checkpoint_data.path,
+        writer.checkpoint_path()?,
         Url::parse("memory:///_delta_log/00000000000000000002.checkpoint.parquet")?
     );
 
+    let mut data_iter = writer.checkpoint_data(&engine)?;
     // The first batch should be the metadata and protocol actions.
     let batch = data_iter.next().unwrap()?;
     assert_eq!(batch.selection_vector, [true, true]);
 
-    // The second batch should only include the add action as the remove action is expired.
+    // The second batch should include both the add action and the remove action
     let batch = data_iter.next().unwrap()?;
     assert_eq!(batch.selection_vector, [true, true]);
 
     // The third batch should not be included as the selection vector does not
-    // contain any true values, as the add action is removed in a following commit.
+    // contain any true values, as the file added is removed in a following commit.
     assert!(data_iter.next().is_none());
 
     assert_eq!(data_iter.actions_count, 4);
@@ -280,15 +279,14 @@ fn test_v1_checkpoint_specific_version() -> DeltaResult<()> {
     // Specify version 0 for checkpoint
     let snapshot = table.snapshot(&engine, Some(0))?;
     let mut writer = snapshot.checkpoint()?;
-    let checkpoint_data = writer.checkpoint_data(&engine)?;
-    let mut data_iter = checkpoint_data.data;
 
     // Verify the checkpoint file path is the specified version.
     assert_eq!(
-        checkpoint_data.path,
+        writer.checkpoint_path()?,
         Url::parse("memory:///_delta_log/00000000000000000000.checkpoint.parquet")?
     );
 
+    let mut data_iter = writer.checkpoint_data(&engine)?;
     // The first batch should be the metadata and protocol actions.
     let batch = data_iter.next().unwrap()?;
     assert_eq!(batch.selection_vector, [true, true]);
@@ -336,20 +334,19 @@ fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
     let table = Table::new(table_root);
     let snapshot = table.snapshot(&engine, None)?;
     let mut writer = snapshot.checkpoint()?;
-    let checkpoint_data = writer.checkpoint_data(&engine)?;
-    let mut data_iter = checkpoint_data.data;
 
     // Verify the checkpoint file path is the latest version by default.
     assert_eq!(
-        checkpoint_data.path,
+        writer.checkpoint_path()?,
         Url::parse("memory:///_delta_log/00000000000000000001.checkpoint.parquet")?
     );
 
+    let mut data_iter = writer.checkpoint_data(&engine)?;
     // The first batch should be the metadata and protocol actions.
     let batch = data_iter.next().unwrap()?;
     assert_eq!(batch.selection_vector, [true, true]);
 
-    // The second batch should be the add action as the remove action is expired.
+    // The second batch should include both the add action and the remove action
     let batch = data_iter.next().unwrap()?;
     assert_eq!(batch.selection_vector, [true, true]);
 
