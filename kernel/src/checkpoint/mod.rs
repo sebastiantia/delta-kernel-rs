@@ -76,8 +76,6 @@
 //! [`LastCheckpointHint`]: crate::snapshot::LastCheckpointHint
 //! [`Table::checkpoint`]: crate::table::Table::checkpoint
 // Future extensions
-// - TODO(#836): Single-file UUID-named V2 checkpoints (using `n.checkpoint.u.{json/parquet}` naming) are to be
-//   implemented in the future. The current implementation only supports classic-named V2 checkpoints.
 // - TODO(#837): Multi-file V2 checkpoints are not supported yet. The API is designed to be extensible for future
 //   multi-file support, but the current implementation only supports single-file checkpoints.
 use std::sync::{Arc, LazyLock};
@@ -188,9 +186,14 @@ pub struct CheckpointWriter {
 impl CheckpointWriter {
     /// Returns the URL where the checkpoint file should be written.
     ///
-    /// This method generates the checkpoint path based on the table's root and the current version.
-    /// The generated path follows the classic naming convention for checkpoints:
-    /// - <table_root>/`n.checkpoint.parquet`, where `n` is the current version of the table.
+    /// This method generates the checkpoint path based on the table's root and the version
+    /// of the underlying snapshot being checkpointed. The resulting path follows the classic
+    /// Delta checkpoint naming convention:
+    ///
+    /// `<table_root>/<version>.checkpoint.parquet`
+    ///
+    /// For example, if the table root is `s3://bucket/path` and the version is `42`,
+    /// the checkpoint path will be:`s3://bucket/path/42.checkpoint.parquet`
     pub fn checkpoint_path(&self) -> DeltaResult<Url> {
         ParsedLogPath::new_classic_parquet_checkpoint(
             self.snapshot.table_root(),
