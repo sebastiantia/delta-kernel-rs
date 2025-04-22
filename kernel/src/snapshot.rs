@@ -252,8 +252,8 @@ impl Snapshot {
     ///
     /// See the [`crate::checkpoint`] module documentation for more details on checkpoint types
     /// and the overall checkpoint process.    
-    pub fn checkpoint(self) -> DeltaResult<CheckpointWriter> {
-        Ok(CheckpointWriter::new(Arc::new(self)))
+    pub fn checkpoint(self: Arc<Self>) -> DeltaResult<CheckpointWriter> {
+        Ok(CheckpointWriter { snapshot: self })
     }
 
     /// Log segment this snapshot uses

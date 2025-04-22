@@ -190,16 +190,11 @@ pub struct CheckpointWriter {
 }
 
 impl CheckpointWriter {
-    /// Creates a new CheckpointWriter from a snapshot
-    pub(crate) fn new(snapshot: Arc<Snapshot>) -> Self {
-        Self { snapshot }
-    }
-
     /// Returns the URL where the checkpoint file should be written.
     ///
     /// This method generates the checkpoint path based on the table's root and the current version.
     /// The generated path follows the classic naming convention for checkpoints:
-    /// - `n.checkpoint.parquet`, where `n` is the current version of the table.
+    /// - <table_root>/`n.checkpoint.parquet`, where `n` is the current version of the table.
     pub fn checkpoint_path(&self) -> DeltaResult<Url> {
         ParsedLogPath::new_classic_parquet_checkpoint(
             self.snapshot.table_root(),

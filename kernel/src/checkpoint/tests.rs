@@ -60,7 +60,9 @@ fn create_test_snapshot(engine: &dyn Engine) -> DeltaResult<Arc<Snapshot>> {
 fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
     let engine = SyncEngine::new();
     let version = 10;
-    let writer = CheckpointWriter::new(create_test_snapshot(&engine)?);
+    let writer = CheckpointWriter {
+        snapshot: create_test_snapshot(&engine)?,
+    };
 
     let checkpoint_batch = writer.create_checkpoint_metadata_batch(version, &engine)?;
 
@@ -220,7 +222,7 @@ fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
     let snapshot = table.snapshot(&engine, None)?;
-    let mut writer = snapshot.checkpoint()?;
+    let mut writer = Arc::new(snapshot).checkpoint()?;
 
     // Verify the checkpoint file path is the latest version by default.
     assert_eq!(
@@ -278,7 +280,7 @@ fn test_v1_checkpoint_specific_version() -> DeltaResult<()> {
     let table = Table::new(table_root);
     // Specify version 0 for checkpoint
     let snapshot = table.snapshot(&engine, Some(0))?;
-    let mut writer = snapshot.checkpoint()?;
+    let mut writer = Arc::new(snapshot).checkpoint()?;
 
     // Verify the checkpoint file path is the specified version.
     assert_eq!(
@@ -333,7 +335,7 @@ fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
     let snapshot = table.snapshot(&engine, None)?;
-    let mut writer = snapshot.checkpoint()?;
+    let mut writer = Arc::new(snapshot).checkpoint()?;
 
     // Verify the checkpoint file path is the latest version by default.
     assert_eq!(
