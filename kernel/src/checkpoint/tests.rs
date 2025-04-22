@@ -219,7 +219,8 @@ fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
 
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
-    let mut writer = table.checkpoint(&engine, None)?;
+    let snapshot = table.snapshot(&engine, None)?;
+    let mut writer = snapshot.checkpoint()?;
     let checkpoint_data = writer.checkpoint_data(&engine)?;
     let mut data_iter = checkpoint_data.data;
 
@@ -277,7 +278,8 @@ fn test_v1_checkpoint_specific_version() -> DeltaResult<()> {
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
     // Specify version 0 for checkpoint
-    let mut writer = table.checkpoint(&engine, Some(0))?;
+    let snapshot = table.snapshot(&engine, Some(0))?;
+    let mut writer = snapshot.checkpoint()?;
     let checkpoint_data = writer.checkpoint_data(&engine)?;
     let mut data_iter = checkpoint_data.data;
 
@@ -332,7 +334,8 @@ fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
 
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
-    let mut writer = table.checkpoint(&engine, None)?;
+    let snapshot = table.snapshot(&engine, None)?;
+    let mut writer = snapshot.checkpoint()?;
     let checkpoint_data = writer.checkpoint_data(&engine)?;
     let mut data_iter = checkpoint_data.data;
 
@@ -361,31 +364,5 @@ fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
     assert_eq!(data_iter.add_actions_count, 1);
 
     // TODO(#850): Finalize and verify _last_checkpoint
-    Ok(())
-}
-
-/// Tests the `checkpoint()` API with:
-/// - a version that does not exist in the log
-#[test]
-fn test_checkpoint_error_handling_invalid_version() -> DeltaResult<()> {
-    let (store, _) = new_in_memory_store();
-    let engine = DefaultEngine::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
-
-    // 1st commit (version 0) - metadata and protocol actions
-    // Protocol action does not include the v2Checkpoint reader/writer feature.
-    write_commit_to_store(
-        &store,
-        vec![create_basic_protocol_action(), create_metadata_action()],
-        0,
-    )?;
-    let table_root = Url::parse("memory:///")?;
-    let table = Table::new(table_root);
-    let result = table.checkpoint(&engine, Some(999));
-
-    // Should fail with an appropriate error
-    // Returns error: "LogSegment end version 0 not the same as the specified end version 999"
-    // TODO(#854): Returned error should be tailored to checkpoint creation
-    assert!(result.is_err());
-
     Ok(())
 }

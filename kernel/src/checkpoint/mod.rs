@@ -1,6 +1,6 @@
 //! This module implements the API for writing single-file checkpoints.
 //!
-//! The entry-point for this API is [`Table::checkpoint`].
+//! The entry-point for this API is [`Snapshot::checkpoint`].
 //!
 //! ## Checkpoint Types and Selection Logic
 //! This API supports two checkpoint types, selected based on table features:
@@ -23,7 +23,7 @@
 //!
 //! The following steps outline the process of creating a checkpoint:
 //!
-//! 1. Create a [`CheckpointWriter`] using [`Table::checkpoint`]
+//! 1. Create a [`CheckpointWriter`] using [`Snapshot::checkpoint`]
 //! 2. Get [`CheckpointData`] from [`CheckpointWriter::checkpoint_data`]
 //! 3. Write the [`CheckpointData::data`] to [`CheckpointData::path`]
 //! 4. Collect metadata ([`FileMeta`]) from the write operation
@@ -33,10 +33,12 @@
 //! # use std::sync::Arc;
 //! # use delta_kernel::checkpoint::CheckpointData;
 //! # use delta_kernel::checkpoint::CheckpointWriter;
+//! # use delta_kernel::Engine;
 //! # use delta_kernel::table::Table;
 //! # use delta_kernel::DeltaResult;
 //! # use delta_kernel::Error;
 //! # use delta_kernel::FileMeta;
+//! # use delta_kernel::snapshot::Snapshot;
 //! # use url::Url;
 //! fn write_checkpoint_file(checkpoint_data: &CheckpointData) -> DeltaResult<FileMeta> {
 //!     todo!() /* engine-specific logic to write checkpoint_data.data to checkpoint_data.path */
@@ -48,8 +50,11 @@
 //! // Create a table instance for the table you want to checkpoint
 //! let table = Table::try_from_uri("./tests/data/app-txn-no-checkpoint")?;
 //!
-//! // Create a checkpoint writer for a version of the table (`None` for latest)
-//! let mut writer: CheckpointWriter = table.checkpoint(&engine, Some(1))?;
+//! // Create a snapshot of a specific version of the table (e.g., version 1)
+//! let snapshot: Arc<Snapshot> = table.snapshot(&engine, Some(1))?;
+//!
+//! // Create a checkpoint writer from the snapshot
+//! let mut writer: CheckpointWriter = snapshot.checkpoint()?;
 //!
 //! // Get the checkpoint data and path
 //! let checkpoint_data = writer.checkpoint_data(&engine)?;
@@ -70,7 +75,6 @@
 //!
 //! [`CheckpointMetadata`]: crate::actions::CheckpointMetadata
 //! [`LastCheckpointHint`]: crate::snapshot::LastCheckpointHint
-//! [`Table::checkpoint`]: crate::table::Table::checkpoint
 // Future extensions
 // - TODO(#836): Single-file UUID-named V2 checkpoints (using `n.checkpoint.u.{json/parquet}` naming) are to be
 //   implemented in the future. The current implementation only supports classic-named V2 checkpoints.

@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use crate::actions::{Metadata, Protocol};
+use crate::checkpoint::CheckpointWriter;
 use crate::log_segment::{self, LogSegment};
 use crate::scan::ScanBuilder;
 use crate::schema::{Schema, SchemaRef};
@@ -245,6 +246,14 @@ impl Snapshot {
             log_segment,
             table_configuration,
         })
+    }
+
+    /// Creates a [`CheckpointWriter`] for generating a checkpoint for this snapshot.
+    ///
+    /// See the [`crate::checkpoint`] module documentation for more details on checkpoint types
+    /// and the overall checkpoint process.    
+    pub fn checkpoint(self) -> DeltaResult<CheckpointWriter> {
+        Ok(CheckpointWriter::new(Arc::new(self)))
     }
 
     /// Log segment this snapshot uses
