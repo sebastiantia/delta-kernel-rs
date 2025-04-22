@@ -45,19 +45,19 @@
 //! }
 //!
 //! // Create an engine instance
-//! let engine: Arc<dyn Engine> = Arc::new(todo!("create your engine here"));
+//! let engine: &dyn Engine = todo!("create your engine here");
 //!
 //! // Create a table instance for the table you want to checkpoint
 //! let table = Table::try_from_uri("./tests/data/app-txn-no-checkpoint")?;
 //!
 //! // Create a snapshot of a specific version of the table (e.g., version 1)
-//! let snapshot: Arc<Snapshot> = table.snapshot(&engine, Some(1))?;
+//! let snapshot: Snapshot = table.snapshot(engine, Some(1))?;
 //!
 //! // Create a checkpoint writer from the snapshot
 //! let mut writer: CheckpointWriter = snapshot.checkpoint()?;
 //!
 //! // Get the checkpoint data and path
-//! let checkpoint_data = writer.checkpoint_data(&engine)?;
+//! let checkpoint_data = writer.checkpoint_data(engine)?;
 //!
 //! // Write the checkpoint data to the object store and collect metadata
 //! let metadata: FileMeta = write_checkpoint_file(&checkpoint_data)?;
