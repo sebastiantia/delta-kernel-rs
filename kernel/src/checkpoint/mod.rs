@@ -72,10 +72,17 @@
 //! ## Warning
 //! Multi-part (V1) checkpoints are DEPRECATED and UNSAFE.
 //!
+//! ## Note
+//! We currently do not plan to support UUID-named V2 checkpoints, since S3's put-if-absent
+//! semantics remove the need for UUIDs to ensure uniqueness. Supporting only classic-named
+//! checkpoints avoids added complexity, such as coordinating naming decisions between kernel and
+//! engine, and handling coexistence with legacy V1 checkpoints. If a compelling use case arises
+//! in the future, we can revisit this decision.
+//!
 //! [`CheckpointMetadata`]: crate::actions::CheckpointMetadata
 //! [`LastCheckpointHint`]: crate::snapshot::LastCheckpointHint
 //! [`Table::checkpoint`]: crate::table::Table::checkpoint
-// Future extensions
+// Future extensions:
 // - TODO(#837): Multi-file V2 checkpoints are not supported yet. The API is designed to be extensible for future
 //   multi-file support, but the current implementation only supports single-file checkpoints.
 use std::sync::{Arc, LazyLock};
