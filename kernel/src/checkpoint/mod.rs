@@ -293,7 +293,6 @@ impl CheckpointWriter {
     /// - `engine`: Implementation of [`Engine`] apis.
     /// - `metadata`: The metadata of the written checkpoint file
     /// - `checkpoint_data_iter`: The exhausted checkpoint data iterator (must be fully consumed)
-
     ///
     /// # Returns: [`variant@Ok`] if the checkpoint was successfully finalized
     #[allow(unused)]

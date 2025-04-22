@@ -248,7 +248,7 @@ impl Snapshot {
         })
     }
 
-    /// Creates a [`CheckpointWriter`] for generating a checkpoint for this snapshot.
+    /// Creates a [`CheckpointWriter`] for generating a checkpoint from this snapshot.
     ///
     /// See the [`crate::checkpoint`] module documentation for more details on checkpoint types
     /// and the overall checkpoint process.    
