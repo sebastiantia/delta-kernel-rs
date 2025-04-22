@@ -27,7 +27,7 @@
 //! 2. Get the checkpoint data from [`CheckpointWriter::checkpoint_data`]
 //! 3. Write the data to the path in object storage (engine-specific)
 //! 4. Collect metadata ([`FileMeta`]) from the write operation
-//! 5. Pass the metadata and consumed data iterator to `CheckpointWriter::finalize`
+//! 5. Pass the metadata and exhausted data iterator to `CheckpointWriter::finalize`
 //!
 //! ```no_run
 //! # use std::sync::Arc;
@@ -64,7 +64,6 @@
 //!
 //! /* IMPORTANT: All data must be written before finalizing the checkpoint */
 //!
-//! // TODO(#850): Implement the finalize method
 //! // writer.finalize(&engine, &metadata, checkpoint_data)?;
 //!
 //! # Ok::<_, Error>(())
@@ -160,15 +159,11 @@ impl Iterator for CheckpointDataIterator {
     /// each batch. The [`CheckpointDataIterator`] is passed back to the kernel on call to
     /// `CheckpointWriter::finalize` for counts to be read and written to the `_last_checkpoint` file
     fn next(&mut self) -> Option<Self::Item> {
-        let next_item = self.checkpoint_batch_iterator.next();
-
-        next_item.map(|result| {
-            result.map(|batch| {
-                self.actions_count += batch.actions_count;
-                self.add_actions_count += batch.add_actions_count;
-                batch.filtered_data
-            })
-        })
+        Some(self.checkpoint_batch_iterator.next()?.map(|batch| {
+            self.actions_count += batch.actions_count;
+            self.add_actions_count += batch.add_actions_count;
+            batch.filtered_data
+        }))
     }
 }
 
@@ -233,11 +228,6 @@ impl CheckpointWriter {
             None,
         )?;
 
-        // Create iterator over actions for checkpoint data
-        let checkpoint_data =
-            CheckpointLogReplayProcessor::new(self.deleted_file_retention_timestamp()?)
-                .process_actions_iter(actions);
-
         let version = self.snapshot.version().try_into().map_err(|e| {
             Error::CheckpointWrite(format!(
                 "Failed to convert checkpoint version from u64 {} to i64: {}",
@@ -246,15 +236,17 @@ impl CheckpointWriter {
             ))
         })?;
 
-        // Chain the checkpoint metadata action if using V2 checkpoints
-        let chained = checkpoint_data.chain(
-            is_v2_checkpoints_supported
-                .then(|| self.create_checkpoint_metadata_batch(version, engine)),
-        );
+        // Create iterator over actions for checkpoint data
+        let checkpoint_data =
+            CheckpointLogReplayProcessor::new(self.deleted_file_retention_timestamp()?)
+                .process_actions_iter(actions);
+
+        let checkpoint_metadata = is_v2_checkpoints_supported
+            .then(|| self.create_checkpoint_metadata_batch(version, engine));
 
         // Wrap the iterator in a CheckpointDataIterator to track action counts
         Ok(CheckpointDataIterator {
-            checkpoint_batch_iterator: Box::new(chained),
+            checkpoint_batch_iterator: Box::new(checkpoint_data.chain(checkpoint_metadata)),
             actions_count: 0,
             add_actions_count: 0,
         })

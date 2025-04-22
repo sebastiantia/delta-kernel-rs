@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use super::DEFAULT_RETENTION_SECS;
 use crate::actions::{Add, Metadata, Protocol, Remove};
 use crate::arrow::array::{ArrayRef, StructArray};
 use crate::arrow::datatypes::{DataType, Schema};
@@ -26,29 +27,36 @@ use url::Url;
 
 #[test]
 fn test_deleted_file_retention_timestamp() -> DeltaResult<()> {
-    let now = Duration::from_secs(1000).as_millis() as i64;
+    const MILLIS_PER_SECOND: i64 = 1_000;
 
-    // Test cases
+    let reference_time_secs = 10_000;
+    let reference_time = Duration::from_secs(reference_time_secs);
+    let reference_time_millis = reference_time.as_millis() as i64;
+
+    // Retention scenarios:
+    // ( retention duration , expected_timestamp )
     let test_cases = [
-        // Default case (7 days)
-        (None, now - (7 * 24 * 60 * 60 * 1000)),
+        // None = Default retention (7 days)
+        (
+            None,
+            reference_time_millis - (DEFAULT_RETENTION_SECS as i64 * MILLIS_PER_SECOND),
+        ),
         // Zero retention
-        (Some(Duration::from_secs(0)), now),
-        // Custom retention (2000 seconds)
-        // This results in a negative timestamp which is valid - as it just means that
-        // the retention window extends to before UNIX epoch.
-        (Some(Duration::from_secs(2000)), now - (2000 * 1000)),
+        (Some(Duration::from_secs(0)), reference_time_millis),
+        // Custom retention (e.g., 2000 seconds)
+        (
+            Some(Duration::from_secs(2_000)),
+            reference_time_millis - (2_000 * MILLIS_PER_SECOND),
+        ),
     ];
 
-    for (retention, expected) in test_cases {
-        let result =
-            deleted_file_retention_timestamp_with_time(retention, Duration::from_secs(1000))?;
-        assert_eq!(result, expected);
+    for (retention, expected_timestamp) in test_cases {
+        let result = deleted_file_retention_timestamp_with_time(retention, reference_time)?;
+        assert_eq!(result, expected_timestamp);
     }
 
     Ok(())
 }
-
 fn create_test_snapshot(engine: &dyn Engine) -> DeltaResult<Arc<Snapshot>> {
     let path = std::fs::canonicalize(PathBuf::from("./tests/data/app-txn-no-checkpoint/"));
     let url = url::Url::from_directory_path(path.unwrap()).unwrap();
@@ -136,26 +144,14 @@ fn write_commit_to_store(
 /// Create a Protocol action without v2Checkpoint feature support
 fn create_basic_protocol_action() -> Action {
     Action::Protocol(
-        Protocol::try_new(
-            3,
-            7,
-            Vec::<String>::new().into(),
-            Vec::<String>::new().into(),
-        )
-        .unwrap(),
+        Protocol::try_new(3, 7, Some(Vec::<String>::new()), Some(Vec::<String>::new())).unwrap(),
     )
 }
 
 /// Create a Protocol action with v2Checkpoint feature support
 fn create_v2_checkpoint_protocol_action() -> Action {
     Action::Protocol(
-        Protocol::try_new(
-            3,
-            7,
-            vec!["v2Checkpoint"].into(),
-            vec!["v2Checkpoint"].into(),
-        )
-        .unwrap(),
+        Protocol::try_new(3, 7, Some(vec!["v2Checkpoint"]), Some(vec!["v2Checkpoint"])).unwrap(),
     )
 }
 
