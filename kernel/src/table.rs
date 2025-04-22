@@ -112,11 +112,10 @@ impl Table {
     pub fn checkpoint(
         &self,
         engine: &dyn Engine,
-        version: Option<Version>,
+        version: impl Into<Option<Version>>,
     ) -> DeltaResult<CheckpointWriter> {
-        Ok(CheckpointWriter {
-            snapshot: Arc::new(self.snapshot(engine, version)?),
-        })
+        let snapshot = Arc::new(self.snapshot(engine, version.into())?);
+        Ok(CheckpointWriter { snapshot })
     }
 
     /// Create a new write transaction for this table.
