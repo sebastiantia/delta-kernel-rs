@@ -1,19 +1,14 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use super::DEFAULT_RETENTION_SECS;
 use crate::actions::{Add, Metadata, Protocol, Remove};
 use crate::arrow::array::{ArrayRef, StructArray};
 use crate::arrow::datatypes::{DataType, Schema};
-use crate::checkpoint::{deleted_file_retention_timestamp_with_time, CheckpointWriter};
+use crate::checkpoint::deleted_file_retention_timestamp_with_time;
 use crate::engine::arrow_data::ArrowEngineData;
-use crate::engine::{
-    default::{executor::tokio::TokioBackgroundExecutor, DefaultEngine},
-    sync::SyncEngine,
-};
-use crate::snapshot::Snapshot;
+use crate::engine::default::{executor::tokio::TokioBackgroundExecutor, DefaultEngine};
 use crate::utils::test_utils::Action;
 use crate::DeltaResult;
-use crate::Engine;
 use crate::Table;
 
 use arrow_53::{
@@ -57,22 +52,29 @@ fn test_deleted_file_retention_timestamp() -> DeltaResult<()> {
 
     Ok(())
 }
-fn create_test_snapshot(engine: &dyn Engine) -> DeltaResult<Arc<Snapshot>> {
-    let path = std::fs::canonicalize(PathBuf::from("./tests/data/app-txn-no-checkpoint/"));
-    let url = url::Url::from_directory_path(path.unwrap()).unwrap();
-    let table = Table::new(url);
-    Ok(Arc::new(table.snapshot(engine, None)?))
-}
 
 #[test]
 fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
-    let engine = SyncEngine::new();
-    let version = 10;
-    let writer = CheckpointWriter {
-        snapshot: create_test_snapshot(&engine)?,
-    };
+    let (store, _) = new_in_memory_store();
+    let engine = DefaultEngine::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
 
-    let checkpoint_batch = writer.create_checkpoint_metadata_batch(version, &engine)?;
+    // 1st commit (version 0) - metadata and protocol actions
+    // Protocol action does not include the v2Checkpoint reader/writer feature.
+    write_commit_to_store(
+        &store,
+        vec![
+            create_v2_checkpoint_protocol_action(),
+            create_metadata_action(),
+        ],
+        0,
+    )?;
+
+    let table_root = Url::parse("memory:///")?;
+    let table = Table::new(table_root);
+    let snapshot = table.snapshot(&engine, None)?;
+    let writer = Arc::new(snapshot).checkpoint()?;
+
+    let checkpoint_batch = writer.create_checkpoint_metadata_batch(0, &engine)?;
 
     // Check selection vector has one true value
     assert_eq!(checkpoint_batch.filtered_data.selection_vector, vec![true]);
@@ -94,7 +96,7 @@ fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
         expected_schema,
         vec![Arc::new(StructArray::from(vec![(
             Arc::new(Field::new("version", DataType::Int64, false)),
-            create_array!(Int64, [version]) as ArrayRef,
+            create_array!(Int64, [0]) as ArrayRef,
         )]))],
     )
     .unwrap();
@@ -217,8 +219,7 @@ fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
 
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
-    let snapshot = table.snapshot(&engine, None)?;
-    let mut writer = Arc::new(snapshot).checkpoint()?;
+    let mut writer = table.checkpoint(&engine, None)?;
 
     // Verify the checkpoint file path is the latest version by default.
     assert_eq!(
@@ -275,8 +276,7 @@ fn test_v1_checkpoint_specific_version() -> DeltaResult<()> {
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
     // Specify version 0 for checkpoint
-    let snapshot = table.snapshot(&engine, Some(0))?;
-    let mut writer = Arc::new(snapshot).checkpoint()?;
+    let mut writer = table.checkpoint(&engine, Some(0))?;
 
     // Verify the checkpoint file path is the specified version.
     assert_eq!(
@@ -330,8 +330,7 @@ fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
 
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
-    let snapshot = table.snapshot(&engine, None)?;
-    let mut writer = Arc::new(snapshot).checkpoint()?;
+    let mut writer = table.checkpoint(&engine, None)?;
 
     // Verify the checkpoint file path is the latest version by default.
     assert_eq!(

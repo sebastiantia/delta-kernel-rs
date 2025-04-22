@@ -1,6 +1,8 @@
 //! This module implements the API for writing single-file checkpoints.
 //!
-//! The entry-point for this API is [`Snapshot::checkpoint`].
+//! The entry-points for this API are:
+//! 1. [`Snapshot::checkpoint`]
+//! 2. [`Table::checkpoint`]
 //!
 //! ## Checkpoint Types and Selection Logic
 //! This API supports two checkpoint types, selected based on table features:
@@ -22,7 +24,7 @@
 //!
 //! The following steps outline the process of creating a checkpoint:
 //!
-//! 1. Create a [`CheckpointWriter`] using [`Snapshot::checkpoint`]
+//! 1. Create a [`CheckpointWriter`] using [`Snapshot::checkpoint`] or [`Table::checkpoint`]
 //! 2. Get the checkpoint path from [`CheckpointWriter::checkpoint_path`]
 //! 2. Get the checkpoint data from [`CheckpointWriter::checkpoint_data`]
 //! 3. Write the data to the path in object storage (engine-specific)
@@ -49,11 +51,9 @@
 //! // Create a table instance for the table you want to checkpoint
 //! let table = Table::try_from_uri("./tests/data/app-txn-no-checkpoint")?;
 //!
-//! // Create a snapshot of a specific version of the table (e.g., version 1)
-//! let snapshot: Snapshot = table.snapshot(engine, Some(1))?;
-//!
-//! // Create a checkpoint writer from the snapshot
-//! let mut writer: CheckpointWriter = snapshot.checkpoint()?;
+//! // Create a checkpoint writer from a version of the table (e.g., version 1)
+//! // Alternatively, if you have a snapshot, you can use `Snapshot::checkpoint()`
+//! let mut writer = table.checkpoint(engine, Some(1))?;
 //!
 //! // Get the checkpoint path and data
 //! let checkpoint_path = writer.checkpoint_path()?;
@@ -74,6 +74,7 @@
 //!
 //! [`CheckpointMetadata`]: crate::actions::CheckpointMetadata
 //! [`LastCheckpointHint`]: crate::snapshot::LastCheckpointHint
+//! [`Table`]: crate::table::Table
 // Future extensions
 // - TODO(#836): Single-file UUID-named V2 checkpoints (using `n.checkpoint.u.{json/parquet}` naming) are to be
 //   implemented in the future. The current implementation only supports classic-named V2 checkpoints.
@@ -277,7 +278,9 @@ impl CheckpointWriter {
         // Implementation will use checkpoint_data.actions_count and checkpoint_data.add_actions_count
 
         // TODO(#850): Implement the actual finalization logic
-        todo!("Implement finalize method for checkpoint writer")
+        return Err(Error::checkpoint_write(
+            "Checkpoint finalization is not yet implemented",
+        ));
     }
 
     /// Creates the checkpoint metadata action for V2 checkpoints.
