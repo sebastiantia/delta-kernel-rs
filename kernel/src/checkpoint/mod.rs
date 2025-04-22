@@ -45,7 +45,7 @@
 //! }
 //!
 //! // Create an engine instance
-//! let engine: &dyn Engine = todo!("create your engine here");
+//! let engine: &dyn Engine = todo!();
 //!
 //! // Create a table instance for the table you want to checkpoint
 //! let table = Table::try_from_uri("./tests/data/app-txn-no-checkpoint")?;
