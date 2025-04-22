@@ -74,7 +74,7 @@
 //!
 //! [`CheckpointMetadata`]: crate::actions::CheckpointMetadata
 //! [`LastCheckpointHint`]: crate::snapshot::LastCheckpointHint
-//! [`Table`]: crate::table::Table
+//! [`Table::checkpoint`]: crate::table::Table::checkpoint
 // Future extensions
 // - TODO(#836): Single-file UUID-named V2 checkpoints (using `n.checkpoint.u.{json/parquet}` naming) are to be
 //   implemented in the future. The current implementation only supports classic-named V2 checkpoints.
@@ -278,9 +278,9 @@ impl CheckpointWriter {
         // Implementation will use checkpoint_data.actions_count and checkpoint_data.add_actions_count
 
         // TODO(#850): Implement the actual finalization logic
-        return Err(Error::checkpoint_write(
+        Err(Error::checkpoint_write(
             "Checkpoint finalization is not yet implemented",
-        ));
+        ))
     }
 
     /// Creates the checkpoint metadata action for V2 checkpoints.
