@@ -129,9 +129,9 @@ static CHECKPOINT_ACTIONS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 
 // Schema of the [`CheckpointMetadata`] action that is included in V2 checkpoints
 // We cannot use `CheckpointMetadata::to_schema()` as it would include the 'tags' field which
-// we're not supporting yet due to the lack of map support.
+// we're not supporting yet due to the lack of map support TODO(#880).
 static CHECKPOINT_METADATA_ACTION_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    Arc::new(StructType::new([StructField::not_null(
+    Arc::new(StructType::new([StructField::nullable(
         CHECKPOINT_METADATA_NAME,
         DataType::struct_type([StructField::not_null("version", DataType::LONG)]),
     )]))
@@ -195,12 +195,12 @@ impl CheckpointWriter {
     ///
     /// This method generates the checkpoint path based on the table's root and the version
     /// of the underlying snapshot being checkpointed. The resulting path follows the classic
-    /// Delta checkpoint naming convention:
+    /// Delta checkpoint naming convention (where the version is zero-padded to 20 digits):
     ///
     /// `<table_root>/<version>.checkpoint.parquet`
     ///
-    /// For example, if the table root is `s3://bucket/path` and the version is `42`,
-    /// the checkpoint path will be:`s3://bucket/path/42.checkpoint.parquet`
+    /// For example, if the table root is `s3://bucket/path` and the version is `10`,
+    /// the checkpoint path will be: `s3://bucket/path/00000000000000000010.checkpoint.parquet`
     pub fn checkpoint_path(&self) -> DeltaResult<Url> {
         ParsedLogPath::new_classic_parquet_checkpoint(
             self.snapshot.table_root(),
@@ -226,7 +226,7 @@ impl CheckpointWriter {
     // 4. Chains the checkpoint metadata action if writing a V2 spec checkpoint
     //    (i.e., if `v2Checkpoints` feature is supported by table)
     // 5. Generates the appropriate checkpoint path
-    pub fn checkpoint_data(&mut self, engine: &dyn Engine) -> DeltaResult<CheckpointDataIterator> {
+    pub fn checkpoint_data(&self, engine: &dyn Engine) -> DeltaResult<CheckpointDataIterator> {
         let is_v2_checkpoints_supported = self
             .snapshot
             .table_configuration()
@@ -239,21 +239,13 @@ impl CheckpointWriter {
             None,
         )?;
 
-        let version = self.snapshot.version().try_into().map_err(|e| {
-            Error::CheckpointWrite(format!(
-                "Failed to convert checkpoint version from u64 {} to i64: {}",
-                self.snapshot.version(),
-                e
-            ))
-        })?;
-
         // Create iterator over actions for checkpoint data
         let checkpoint_data =
             CheckpointLogReplayProcessor::new(self.deleted_file_retention_timestamp()?)
                 .process_actions_iter(actions);
 
-        let checkpoint_metadata = is_v2_checkpoints_supported
-            .then(|| self.create_checkpoint_metadata_batch(version, engine));
+        let checkpoint_metadata =
+            is_v2_checkpoints_supported.then(|| self.create_checkpoint_metadata_batch(engine));
 
         // Wrap the iterator in a CheckpointDataIterator to track action counts
         Ok(CheckpointDataIterator {
@@ -311,9 +303,16 @@ impl CheckpointWriter {
     /// batch should be included in the checkpoint.
     fn create_checkpoint_metadata_batch(
         &self,
-        version: i64,
         engine: &dyn Engine,
     ) -> DeltaResult<CheckpointBatch> {
+        let version: i64 = self.snapshot.version().try_into().map_err(|e| {
+            Error::CheckpointWrite(format!(
+                "Failed to convert checkpoint version from u64 {} to i64: {}",
+                self.snapshot.version(),
+                e
+            ))
+        })?;
+
         let checkpoint_metadata_batch = engine.evaluation_handler().create_one(
             CHECKPOINT_METADATA_ACTION_SCHEMA.clone(),
             &[Scalar::from(version)],
@@ -331,16 +330,20 @@ impl CheckpointWriter {
         })
     }
 
-    /// Calculates the cutoff timestamp for deleted file cleanup.
-    ///
     /// This function determines the minimum timestamp before which deleted files
-    /// will be permanently removed during VACUUM operations, based on the table's
-    /// `deleted_file_retention_duration` property.
+    /// are eligible for permanent removal during VACUUM operations. It is used
+    /// during checkpointing to decide whether to include `remove` actions.
     ///
-    /// Returns the cutoff timestamp in milliseconds since epoch, matching
-    /// the remove action's `deletion_timestamp` field format for comparison.
+    /// If a deleted file's timestamp is older than this threshold (based on the
+    /// table's `deleted_file_retention_duration`), the corresponding `remove` action
+    /// is included in the checkpoint, allowing VACUUM operations to later identify
+    /// and clean up those files.
     ///
-    /// The default retention period is 7 days, matching delta-spark's behavior.
+    /// # Returns:
+    /// The cutoff timestamp in milliseconds since epoch, matching the remove action's
+    /// `deletion_timestamp` field format for comparison.
+    ///
+    /// # Note: The default retention period is 7 days, matching delta-spark's behavior.
     fn deleted_file_retention_timestamp(&self) -> DeltaResult<i64> {
         let retention_duration = self
             .snapshot

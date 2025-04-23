@@ -74,7 +74,7 @@ fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
     let snapshot = table.snapshot(&engine, None)?;
     let writer = Arc::new(snapshot).checkpoint()?;
 
-    let checkpoint_batch = writer.create_checkpoint_metadata_batch(0, &engine)?;
+    let checkpoint_batch = writer.create_checkpoint_metadata_batch(&engine)?;
 
     // Check selection vector has one true value
     assert_eq!(checkpoint_batch.filtered_data.selection_vector, vec![true]);
@@ -90,7 +90,7 @@ fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
     let expected_schema = Arc::new(Schema::new(vec![Field::new(
         "checkpointMetadata",
         DataType::Struct(vec![Field::new("version", DataType::Int64, false)].into()),
-        false,
+        true,
     )]));
     let expected = RecordBatch::try_new(
         expected_schema,
@@ -219,7 +219,7 @@ fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
 
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
-    let mut writer = table.checkpoint(&engine, None)?;
+    let writer = table.checkpoint(&engine, None)?;
 
     // Verify the checkpoint file path is the latest version by default.
     assert_eq!(
@@ -276,7 +276,7 @@ fn test_v1_checkpoint_specific_version() -> DeltaResult<()> {
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
     // Specify version 0 for checkpoint
-    let mut writer = table.checkpoint(&engine, Some(0))?;
+    let writer = table.checkpoint(&engine, Some(0))?;
 
     // Verify the checkpoint file path is the specified version.
     assert_eq!(
@@ -330,7 +330,7 @@ fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
 
     let table_root = Url::parse("memory:///")?;
     let table = Table::new(table_root);
-    let mut writer = table.checkpoint(&engine, None)?;
+    let writer = table.checkpoint(&engine, None)?;
 
     // Verify the checkpoint file path is the latest version by default.
     assert_eq!(
