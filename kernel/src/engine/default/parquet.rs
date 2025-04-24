@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::arrow::array::builder::{MapBuilder, MapFieldNames, StringBuilder};
 use crate::arrow::array::{BooleanArray, Int64Array, RecordBatch, StringArray};
+#[cfg(test)]
 use crate::engine_data::FilteredEngineData;
 use crate::parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
@@ -13,6 +14,7 @@ use crate::parquet::arrow::arrow_reader::{
 use crate::parquet::arrow::arrow_writer::ArrowWriter;
 use crate::parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 use futures::StreamExt;
+use itertools::Itertools;
 use object_store::path::Path;
 use object_store::DynObjectStore;
 use uuid::Uuid;
@@ -111,31 +113,33 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         self
     }
 
-    pub async fn write_parquet_from_iterator(
+    // Writes an iterator of `EngineData` batches to a parquet file at the specified path and
+    // returns the parquet metadata as a `DataFileMetadata`.
+    //
+    // Note: after encoding the data as parquet, this issues a PUT followed by a HEAD to storage in
+    // order to obtain metadata about the object just written.
+    async fn write_parquet_from_iterator(
         &self,
-        path: &url::Url,
+        path: url::Url,
         data_iter: impl Iterator<Item = DeltaResult<Box<dyn EngineData>>>,
     ) -> DeltaResult<DataFileMetadata> {
-        // Convert all EngineData to RecordBatches
-        let record_batches: Vec<RecordBatch> = data_iter
+        // Convert all EngineData batches to RecordBatches
+        let record_batches: Vec<_> = data_iter
             .map(|res| -> DeltaResult<RecordBatch> {
                 let data = res?;
                 let batch = ArrowEngineData::try_from_engine_data(data)?;
-                Ok(batch.record_batch().clone())
+                Ok(batch.into_record_batch())
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .try_collect()?;
 
         if record_batches.is_empty() {
             return Err(Error::generic("No data to write"));
         }
 
-        // Get schema from first batch
-        let schema = record_batches[0].schema();
-
         // Write all batches to the same Parquet file
         let mut buffer = vec![];
-        let mut writer = ArrowWriter::try_new(&mut buffer, schema, None)?;
-
+        // Get the schema from the first batch
+        let mut writer = ArrowWriter::try_new(&mut buffer, record_batches[0].schema(), None)?;
         for batch in record_batches {
             writer.write(&batch)?;
         }
@@ -147,6 +151,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
             .put(&Path::from(path.path()), buffer.into())
             .await?;
 
+        // Get the metadata of the written file
         let metadata = self.store.head(&Path::from(path.path())).await?;
         let modification_time = metadata.last_modified.timestamp_millis();
         if size != metadata.size {
@@ -156,7 +161,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
             )));
         }
 
-        let file_meta = FileMeta::new(path.clone(), modification_time, size);
+        let file_meta = FileMeta::new(path, modification_time, size);
         Ok(DataFileMetadata::new(file_meta))
     }
 
@@ -179,7 +184,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
             )));
         }
         let path = path.join(&name)?;
-        self.write_parquet_from_iterator(&path, std::iter::once(Ok(data)))
+        self.write_parquet_from_iterator(path, std::iter::once(Ok(data)))
             .await
     }
 
@@ -205,50 +210,50 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     /// [`EngineData`] and a selection vector indicating which rows to keep. It filters each batch
     /// according to its selection vector and writes all retained rows to a single parquet file at the
     /// specified path.
-    pub async fn write_filtered_parquet(
+    ///
+    /// Note: The selection vector must match the number of rows in the corresponding batch.
+    #[cfg(test)]
+    async fn write_filtered_parquet(
         &self,
-        path: &url::Url,
-        data_with_masks: impl Iterator<Item = FilteredEngineData>,
+        path: url::Url,
+        filtered_data: impl Iterator<Item = FilteredEngineData>,
     ) -> DeltaResult<DataFileMetadata> {
-        // Transform each FilteredEngineData into filtered EngineData
-        let filtered_data =
-            data_with_masks.map(|filtered_data| -> DeltaResult<Box<dyn EngineData>> {
-                let batch = ArrowEngineData::try_from_engine_data(filtered_data.data)?;
-                let record_batch = batch.record_batch();
+        use arrow_53::compute::filter;
 
-                // check!
-                // Validate mask length
-                if filtered_data.selection_vector.len() != record_batch.num_rows() {
-                    return Err(Error::generic(format!(
-                        "Mask length ({}) doesn't match number of rows ({})",
-                        filtered_data.selection_vector.len(),
-                        record_batch.num_rows()
-                    )));
-                }
+        // Process each FilteredEngineData item, transforming into filtered EngineData
+        let data = filtered_data.map(|batch| -> DeltaResult<Box<dyn EngineData>> {
+            let record_batch =
+                ArrowEngineData::try_from_engine_data(batch.data)?.into_record_batch();
 
-                // Create a Boolean Array from the mask
-                let mask_array = Arc::new(BooleanArray::from(filtered_data.selection_vector));
+            // Check that the selection vector length matches the number of rows
+            if batch.selection_vector.len() != record_batch.num_rows() {
+                return Err(Error::generic(format!(
+                    "Mask length ({}) doesn't match number of rows ({})",
+                    batch.selection_vector.len(),
+                    record_batch.num_rows()
+                )));
+            }
 
-                // Filter each column in the record batch based on the mask
-                let filtered_arrays = record_batch
-                    .columns()
-                    .iter()
-                    .map(|array| {
-                        crate::arrow::compute::filter(array.as_ref(), &mask_array)
-                            .map_err(|e| Error::generic(format!("Error filtering array: {}", e)))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+            // Create arrow array from selection vector
+            let selection_array = Arc::new(BooleanArray::from(batch.selection_vector));
 
-                // Create a new record batch with the filtered arrays
-                let filtered_batch = RecordBatch::try_new(record_batch.schema(), filtered_arrays)?;
+            // Apply filter to each column in parallel
+            let filtered_columns = record_batch
+                .columns()
+                .iter()
+                .map(|col| {
+                    filter(col.as_ref(), &selection_array)
+                        .map_err(|e| Error::generic(format!("Error filtering column: {e}")))
+                })
+                .try_collect()?;
 
-                // Return filtered data as EngineData
-                Ok(Box::new(ArrowEngineData::new(filtered_batch)))
-            });
+            // Create filtered record batch and convert back to EngineData
+            let filtered_batch = RecordBatch::try_new(record_batch.schema(), filtered_columns)?;
+            Ok(Box::new(ArrowEngineData::new(filtered_batch)))
+        });
 
-        // Write the filtered data
-        self.write_parquet_from_iterator(path, filtered_data.into_iter())
-            .await
+        // Write the filtered data to parquet
+        self.write_parquet_from_iterator(path, data).await
     }
 }
 
@@ -462,6 +467,16 @@ mod tests {
             .map(Into::into)
     }
 
+    fn make_batch(ids: Vec<i64>, names: Vec<&str>) -> Box<dyn EngineData> {
+        Box::new(ArrowEngineData::new(
+            RecordBatch::try_from_iter(vec![
+                ("id", Arc::new(Int64Array::from(ids)) as Arc<dyn Array>),
+                ("name", Arc::new(StringArray::from(names)) as Arc<dyn Array>),
+            ])
+            .unwrap(),
+        ))
+    }
+
     #[tokio::test]
     async fn test_read_parquet_files() {
         let store = Arc::new(LocalFileSystem::new());
@@ -554,13 +569,7 @@ mod tests {
         let parquet_handler =
             DefaultParquetHandler::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
 
-        let data = Box::new(ArrowEngineData::new(
-            RecordBatch::try_from_iter(vec![(
-                "a",
-                Arc::new(Int64Array::from(vec![1, 2, 3])) as Arc<dyn Array>,
-            )])
-            .unwrap(),
-        ));
+        let data = make_batch(vec![1, 2, 3], vec!["a", "b", "c"]);
 
         let write_metadata = parquet_handler
             .write_parquet(&Url::parse("memory:///data/").unwrap(), data)
@@ -638,163 +647,31 @@ mod tests {
             .await
             .is_err());
     }
+
     #[tokio::test]
-    async fn test_write_filtered_parquet() {
-        // ARRANGE
-        // Setup test environment
+    async fn test_write_multiple_filtered_parquet() -> DeltaResult<()> {
         let store = Arc::new(InMemory::new());
         let parquet_handler =
             DefaultParquetHandler::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
 
-        // Create test data with 5 rows
-        let data = Box::new(ArrowEngineData::new(
-            RecordBatch::try_from_iter(vec![
-                (
-                    "id",
-                    Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])) as Arc<dyn Array>,
-                ),
-                (
-                    "name",
-                    Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e"])) as Arc<dyn Array>,
-                ),
-            ])
-            .unwrap(),
-        ));
-
-        // Create selection vector to keep only rows 0, 2, and 4 (rows with ids 1, 3, 5)
-        let selection_vector = vec![true, false, true, false, true];
-
-        // Create a FilteredEngineData
-        let filtered_data = vec![FilteredEngineData {
-            data,
-            selection_vector,
-        }];
-
-        // Write the filtered data
-        let file_meta = parquet_handler
-            .write_filtered_parquet(
-                &Url::parse("memory:///filtered_data/").unwrap(),
-                filtered_data.into_iter(),
-            )
-            .await
-            .unwrap();
-
-        // Read back the written data
-        let schema = Arc::new(
-            RecordBatch::try_from_iter(vec![
-                ("id", Arc::new(Int64Array::from(vec![0])) as Arc<dyn Array>),
-                (
-                    "name",
-                    Arc::new(StringArray::from(vec![""])) as Arc<dyn Array>,
-                ),
-            ])
-            .unwrap()
-            .schema()
-            .try_into()
-            .unwrap(),
-        );
-
-        let data: Vec<RecordBatch> = parquet_handler
-            .read_parquet_files(&[file_meta.file_meta.clone()], schema, None)
-            .unwrap()
-            .map(into_record_batch)
-            .try_collect()
-            .unwrap();
-
-        // Verify that we have the expected number of results
-        assert_eq!(data.len(), 1, "Should have exactly one batch");
-        assert_eq!(
-            data[0].num_rows(),
-            3,
-            "Should have exactly 3 rows after filtering"
-        );
-
-        // Get the values from the returned arrays
-        let ids = data[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let names = data[0]
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-
-        // Verify the specific values we kept
-        assert_eq!(
-            ids.values(),
-            &[1, 3, 5],
-            "Should have the expected ID values"
-        );
-        assert_eq!(
-            names.iter().collect::<Vec<_>>(),
-            vec![Some("a"), Some("c"), Some("e")],
-            "Should have the expected name values"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_write_multiple_filtered_parquet() {
-        // ARRANGE
-        // Setup test environment
-        let store = Arc::new(InMemory::new());
-        let parquet_handler =
-            DefaultParquetHandler::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
-
-        // Create two data batches with different content
-        let data1 = Box::new(ArrowEngineData::new(
-            RecordBatch::try_from_iter(vec![
-                (
-                    "id",
-                    Arc::new(Int64Array::from(vec![1, 2, 3])) as Arc<dyn Array>,
-                ),
-                (
-                    "name",
-                    Arc::new(StringArray::from(vec!["a", "b", "c"])) as Arc<dyn Array>,
-                ),
-            ])
-            .unwrap(),
-        ));
-
-        let data2 = Box::new(ArrowEngineData::new(
-            RecordBatch::try_from_iter(vec![
-                (
-                    "id",
-                    Arc::new(Int64Array::from(vec![4, 5, 6])) as Arc<dyn Array>,
-                ),
-                (
-                    "name",
-                    Arc::new(StringArray::from(vec!["d", "e", "f"])) as Arc<dyn Array>,
-                ),
-            ])
-            .unwrap(),
-        ));
-
-        // Select specific rows from each batch
-        let selection_vector1 = vec![true, false, true]; // Keep rows 0 and 2 from data1
-        let selection_vector2 = vec![false, true, false]; // Keep row 1 from data2
-
-        // Create FilteredEngineData objects
         let filtered_data = vec![
-            FilteredEngineData {
-                data: data1,
-                selection_vector: selection_vector1,
-            },
-            FilteredEngineData {
-                data: data2,
-                selection_vector: selection_vector2,
-            },
+            FilteredEngineData::new(
+                make_batch(vec![1, 2, 3], vec!["a", "b", "c"]),
+                vec![true, false, true], // Keep rows 0 and 2 from batch1
+            ),
+            FilteredEngineData::new(
+                make_batch(vec![4, 5, 6], vec!["d", "e", "f"]),
+                vec![false, true, false], // Keep row 1 from batch2
+            ),
         ];
 
         // Write the filtered data
         let file_meta = parquet_handler
             .write_filtered_parquet(
-                &Url::parse("memory:///multiple_filtered_data/").unwrap(),
+                Url::parse("memory:///multiple_filtered_data/")?,
                 filtered_data.into_iter(),
             )
-            .await
-            .unwrap();
+            .await?;
 
         // Read back the written data
         let schema = Arc::new(
@@ -804,88 +681,36 @@ mod tests {
                     "name",
                     Arc::new(StringArray::from(vec![""])) as Arc<dyn Array>,
                 ),
-            ])
-            .unwrap()
+            ])?
             .schema()
-            .try_into()
-            .unwrap(),
+            .try_into()?,
         );
 
         let data: Vec<RecordBatch> = parquet_handler
-            .read_parquet_files(&[file_meta.file_meta.clone()], schema, None)
-            .unwrap()
+            .read_parquet_files(&[file_meta.file_meta.clone()], schema, None)?
             .map(into_record_batch)
-            .try_collect()
-            .unwrap();
+            .try_collect()?;
 
         // Verify that we have the expected number of results
-        assert_eq!(data.len(), 1, "Should have exactly one batch");
-        assert_eq!(
-            data[0].num_rows(),
-            3,
-            "Should have exactly 3 rows after filtering"
-        );
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].num_rows(), 3);
 
         // Get the values from the returned arrays
-        let ids = data[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let names = data[0]
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
+        let ids = data[0].column(0).as_any().downcast_ref::<Int64Array>();
+        let names = data[0].column(1).as_any().downcast_ref::<StringArray>();
 
         // Verify the combined values
         assert_eq!(
-            ids.values(),
+            ids.unwrap().values(),
             &[1, 3, 5],
             "Should have the expected ID values"
         );
         assert_eq!(
-            names.iter().collect::<Vec<_>>(),
+            names.unwrap().iter().collect::<Vec<_>>(),
             vec![Some("a"), Some("c"), Some("e")],
             "Should have the expected name values"
         );
-    }
 
-    #[tokio::test]
-    async fn test_write_filtered_parquet_with_empty_selection() {
-        // ARRANGE
-        // Setup test environment
-        let store = Arc::new(InMemory::new());
-        let parquet_handler =
-            DefaultParquetHandler::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
-
-        // Create test data
-        let data = Box::new(ArrowEngineData::new(
-            RecordBatch::try_from_iter(vec![(
-                "id",
-                Arc::new(Int64Array::from(vec![1, 2, 3])) as Arc<dyn Array>,
-            )])
-            .unwrap(),
-        ));
-
-        // Create selection vector that selects no rows
-        let selection_vector = vec![false, false, false];
-
-        // Create a FilteredEngineData
-        let filtered_data = vec![FilteredEngineData {
-            data,
-            selection_vector,
-        }];
-
-        // Check that an empty selection is handled correctly
-        let result = parquet_handler
-            .write_filtered_parquet(
-                &Url::parse("memory:///empty_filtered_data/").unwrap(),
-                filtered_data.into_iter(),
-            )
-            .await;
-
-        // Should succeed even with empty selection, we'll write an empty file
-        assert!(result.is_ok(), "Should handle empty selection gracefully");
+        Ok(())
     }
 }

@@ -41,6 +41,10 @@ impl ArrowEngineData {
     pub fn record_batch(&self) -> &RecordBatch {
         &self.data
     }
+
+    pub fn into_record_batch(self) -> RecordBatch {
+        self.data
+    }
 }
 
 impl From<RecordBatch> for ArrowEngineData {
