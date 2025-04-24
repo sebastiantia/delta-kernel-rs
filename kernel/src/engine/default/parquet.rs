@@ -115,8 +115,10 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     // Writes an iterator of `EngineData` batches to a parquet file at the specified path and
     // returns the parquet metadata as `DataFileMetadata`.
     //
-    // Note: after encoding the data as parquet, this issues a PUT followed by a HEAD to storage in
+    // Notes:
+    // 1. After encoding the data as parquet, this issues a PUT followed by a HEAD to storage in
     // order to obtain metadata about the object just written.
+    // 2. The schema of all batches must be the same.
     async fn write_parquet_from_batches(
         &self,
         path: url::Url,
@@ -166,8 +168,8 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     // Write `data` to `{path}/<uuid>.parquet` as parquet using ArrowWriter and return the parquet
     // metadata (where `<uuid>` is a generated UUIDv4).
     //
-    // Note: after encoding the data as parquet, this issues a PUT followed by a HEAD to storage in
-    // order to obtain metadata about the object just written.
+    // This function is a convenience wrapper around `write_parquet_from_batches` that creates a
+    // unique filename for the parquet file. The path must end with a trailing slash.
     async fn write_parquet(
         &self,
         path: &url::Url,
