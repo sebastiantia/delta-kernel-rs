@@ -14,7 +14,6 @@ use crate::parquet::arrow::arrow_reader::{
 use crate::parquet::arrow::arrow_writer::ArrowWriter;
 use crate::parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 use futures::StreamExt;
-use itertools::Itertools;
 use object_store::path::Path;
 use object_store::DynObjectStore;
 use uuid::Uuid;
@@ -114,45 +113,44 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     }
 
     // Writes an iterator of `EngineData` batches to a parquet file at the specified path and
-    // returns the parquet metadata as a `DataFileMetadata`.
+    // returns the parquet metadata as `DataFileMetadata`.
     //
     // Note: after encoding the data as parquet, this issues a PUT followed by a HEAD to storage in
     // order to obtain metadata about the object just written.
-    async fn write_parquet_from_iterator(
+    async fn write_parquet_from_batches(
         &self,
         path: url::Url,
-        data_iter: impl Iterator<Item = DeltaResult<Box<dyn EngineData>>>,
+        mut data_iter: impl Iterator<Item = DeltaResult<Box<dyn EngineData>>>,
     ) -> DeltaResult<DataFileMetadata> {
-        // Convert all EngineData batches to RecordBatches
-        let record_batches: Vec<_> = data_iter
-            .map(|res| -> DeltaResult<RecordBatch> {
-                let data = res?;
-                let batch = ArrowEngineData::try_from_engine_data(data)?;
-                Ok(batch.into_record_batch())
-            })
-            .try_collect()?;
+        // Get the first batch to extract schema
+        let first_data = data_iter
+            .next()
+            .ok_or_else(|| Error::generic("No data to write"))??;
+        let arrow_engine_data = ArrowEngineData::try_from_engine_data(first_data)?;
+        let first_batch = arrow_engine_data.record_batch();
+        let schema = first_batch.schema();
 
-        if record_batches.is_empty() {
-            return Err(Error::generic("No data to write"));
-        }
-
-        // Write all batches to the same Parquet file
+        // Setup buffer and writer with compression
         let mut buffer = vec![];
-        // Get the schema from the first batch
-        let mut writer = ArrowWriter::try_new(&mut buffer, record_batches[0].schema(), None)?;
-        for batch in record_batches {
-            writer.write(&batch)?;
+        let mut writer = ArrowWriter::try_new(&mut buffer, schema, None)?;
+
+        // Write the batches to buffer
+        writer.write(first_batch)?;
+        for batch_result in data_iter {
+            let data = batch_result?;
+            let batch = ArrowEngineData::try_from_engine_data(data)?;
+            let record_batch = batch.record_batch();
+            writer.write(record_batch)?;
         }
+
         writer.close()?; // writer must be closed to write footer
 
         let size = buffer.len();
-
-        self.store
-            .put(&Path::from(path.path()), buffer.into())
-            .await?;
+        let file_path = Path::from(path.path());
+        self.store.put(&file_path, buffer.into()).await?;
 
         // Get the metadata of the written file
-        let metadata = self.store.head(&Path::from(path.path())).await?;
+        let metadata = self.store.head(&file_path).await?;
         let modification_time = metadata.last_modified.timestamp_millis();
         if size != metadata.size {
             return Err(Error::generic(format!(
@@ -175,7 +173,6 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         path: &url::Url,
         data: Box<dyn EngineData>,
     ) -> DeltaResult<DataFileMetadata> {
-        let name: String = format!("{}.parquet", Uuid::new_v4());
         // fail if path does not end with a trailing slash
         if !path.path().ends_with('/') {
             return Err(Error::generic(format!(
@@ -183,8 +180,9 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
                 path
             )));
         }
+        let name: String = format!("{}.parquet", Uuid::new_v4());
         let path = path.join(&name)?;
-        self.write_parquet_from_iterator(path, std::iter::once(Ok(data)))
+        self.write_parquet_from_batches(path, std::iter::once(Ok(data)))
             .await
     }
 
@@ -213,17 +211,18 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     ///
     /// Note: The selection vector must match the number of rows in the corresponding batch.
     #[cfg(test)]
-    async fn write_filtered_parquet(
+    async fn write_parquet_from_filtered_batches(
         &self,
         path: url::Url,
         filtered_data: impl Iterator<Item = FilteredEngineData>,
     ) -> DeltaResult<DataFileMetadata> {
         use arrow_53::compute::filter;
+        use itertools::Itertools;
 
-        // Process each FilteredEngineData item, transforming into filtered EngineData
+        // Process each `FilteredEngineData` item, transforming each into filtered `EngineData`
         let data = filtered_data.map(|batch| -> DeltaResult<Box<dyn EngineData>> {
-            let record_batch =
-                ArrowEngineData::try_from_engine_data(batch.data)?.into_record_batch();
+            let arrow_engine_data = ArrowEngineData::try_from_engine_data(batch.data)?;
+            let record_batch = arrow_engine_data.record_batch();
 
             // Check that the selection vector length matches the number of rows
             if batch.selection_vector.len() != record_batch.num_rows() {
@@ -237,8 +236,8 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
             // Create arrow array from selection vector
             let selection_array = Arc::new(BooleanArray::from(batch.selection_vector));
 
-            // Apply filter to each column in parallel
-            let filtered_columns = record_batch
+            // Filter each column in the record batch using the selection arrow array
+            let filtered_columns: Vec<_> = record_batch
                 .columns()
                 .iter()
                 .map(|col| {
@@ -253,7 +252,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         });
 
         // Write the filtered data to parquet
-        self.write_parquet_from_iterator(path, data).await
+        self.write_parquet_from_batches(path, data).await
     }
 }
 
@@ -667,7 +666,7 @@ mod tests {
 
         // Write the filtered data
         let file_meta = parquet_handler
-            .write_filtered_parquet(
+            .write_parquet_from_filtered_batches(
                 Url::parse("memory:///multiple_filtered_data/")?,
                 filtered_data.into_iter(),
             )
