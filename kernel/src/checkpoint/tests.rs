@@ -7,16 +7,16 @@ use crate::arrow::datatypes::{DataType, Schema};
 use crate::checkpoint::deleted_file_retention_timestamp_with_time;
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::default::{executor::tokio::TokioBackgroundExecutor, DefaultEngine};
+use crate::object_store::{memory::InMemory, path::Path, ObjectStore};
 use crate::utils::test_utils::Action;
 use crate::DeltaResult;
 use crate::Table;
 
-use arrow_53::{
+use arrow_55::{
     array::{create_array, RecordBatch},
     datatypes::Field,
 };
 
-use object_store::{memory::InMemory, path::Path, ObjectStore};
 use test_utils::delta_path_for_version;
 use url::Url;
 
