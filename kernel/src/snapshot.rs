@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use crate::actions::set_transaction::SetTransactionScanner;
 use crate::actions::{Metadata, Protocol};
 use crate::checkpoint::CheckpointWriter;
 use crate::log_segment::{self, LogSegment};
@@ -316,6 +317,19 @@ impl Snapshot {
     pub fn into_scan_builder(self) -> ScanBuilder {
         ScanBuilder::new(self)
     }
+
+    /// Fetch the latest version of the provided `application_id` for this snapshot.
+    ///
+    /// Note that this method performs log replay (fetches and processes metadata from storage).
+    // TODO: add a get_app_id_versions to fetch all at once using SetTransactionScanner::get_all
+    pub fn get_app_id_version(
+        self: Arc<Self>,
+        application_id: &str,
+        engine: &dyn Engine,
+    ) -> DeltaResult<Option<i64>> {
+        let txn = SetTransactionScanner::get_one(self.log_segment(), application_id, engine)?;
+        Ok(txn.map(|t| t.version))
+    }
 }
 
 // Note: Schema can not be derived because the checkpoint schema is only known at runtime.
@@ -372,10 +386,10 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use object_store::local::LocalFileSystem;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
+    use crate::object_store::local::LocalFileSystem;
+    use crate::object_store::memory::InMemory;
+    use crate::object_store::path::Path;
+    use crate::object_store::ObjectStore;
     use serde_json::json;
 
     use crate::arrow::array::StringArray;
